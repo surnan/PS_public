@@ -62,7 +62,11 @@ if ($user) {
 }
 
 
+# Learn > Microsoft Graph > User Resource Type
+# https://learn.microsoft.com/en-us/graph/api/resources/user?view=graph-rest-1.0
+
+
 # -Filter "proxyAddresses/any(address:address eq 'smtp:$userEmail')" `
-# -ConsistencyLevel eventual `  
+# -ConsistencyLevel eventual ` 
 # -Property Id,DisplayName,UserPrincipalName,jobTitle, createdDateTime, ProxyAddresses `
 # -ErrorAction Stop
