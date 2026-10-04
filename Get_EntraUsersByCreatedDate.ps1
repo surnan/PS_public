@@ -23,6 +23,7 @@ $endDateInput   = Read-Host "Enter end date (MM-DD-YYYY) or blank for today"
 
 # String has value --> DateTime object.
 # String is blank --> use current date.
+# [System.String] <-- .NET String has method = "isNulll..."
 $startDate = [System.String]::IsNullOrWhiteSpace($startDateInput) `
     ? $today `
     : (Convert_To_Date $startDateInput)
