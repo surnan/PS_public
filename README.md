@@ -23,4 +23,17 @@
             * UserPrincipalName
             * CreatedDateTime
             * Job Title
-        
+            
+* Get_EntraUser_Detailse.ps1
+  - Prompt for: **email address**
+  - Output to console and .csv file
+    * If email address matches user as UPN or alias:
+        * Display Name
+        * UPN
+        * Job Title
+        * Account Creation Timestamp
+        * Email aliases
+        * In Table Format:
+            * Group Name
+            * Group Type
+            * Group Email
