@@ -219,3 +219,10 @@ __marimo__/
 
 # Include .csv files
 *.csv
+*.doc
+*.xls
+*.ppt
+*.pst
+*.docx
+*.xlsx
+*.pptx
