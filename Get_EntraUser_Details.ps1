@@ -9,7 +9,6 @@ if ($userEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
     exit
 }
 
-Write-Host "Email format looks valid." -ForegroundColor Yellow
 
 # Connect to Graph if necessary
 $context = Get-MgContext
@@ -41,25 +40,68 @@ catch {
     }
 }
 
-
-
 if ($user) {
     Write-Host "User found in Entra:" -ForegroundColor DarkBlue
 
-    Write-Host "Name: " -ForegroundColor Green -BackgroundColor White -NoNewline
+    Write-Host "Name: " -ForegroundColor Green -NoNewline
     Write-Host "   $($user.DisplayName)"
 
-    Write-Host "UPN: " -ForegroundColor Green -BackgroundColor White -NoNewline
+    Write-Host "UPN: " -ForegroundColor Green -NoNewline
     Write-Host $user.UserPrincipalName
 
-    Write-Host "Job Title: " -ForegroundColor Green -BackgroundColor White -NoNewline
+    Write-Host "Job Title: " -ForegroundColor Green -NoNewline
     Write-Host $user.JobTitle
 
-    Write-Host "Creation Date/Time: " -ForegroundColor Green -BackgroundColor White -NoNewline
+    Write-Host "Creation Date/Time: " -ForegroundColor Green -NoNewline
     Write-Host $user.CreatedDateTime
+
+        # Get user's group memberships
+    Write-Host ""
+    Write-Host "Group Memberships:" -ForegroundColor Green -BackgroundColor White
+
+
+    try {
+
+        $groups = Get-MgUserMemberOf `
+            -UserId $user.Id `
+            -All `
+            -ErrorAction Stop
+
+        if ($groups) {
+
+            foreach ($group in $groups) {
+
+                $groupDetails = Get-MgGroup `
+                    -GroupId $group.Id `
+                    -Property DisplayName,Id `
+                    -ErrorAction SilentlyContinue
+
+                if ($groupDetails) {
+                    Write-Host "  $($groupDetails.DisplayName)"
+                }
+            }
+
+        }
+        else {
+            Write-Host "User is not a member of any groups." -ForegroundColor Yellow
+        }
+
+    }
+    catch {
+
+        Write-Host "Unable to retrieve group memberships." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+
+    }
+    
     } else {
     Write-Host "No Entra user was found with that address." -ForegroundColor Red
+
+
+
 }
+
+
 
 
 # Learn > Microsoft Graph > User Resource Type
