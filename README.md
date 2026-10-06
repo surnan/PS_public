@@ -37,3 +37,15 @@
             * Group Name
             * Group Type
             * Group Email
+  
+* Get_OffboardingExceptions.ps1
+    - No prompt for input
+    - Output:
+    * CONSOLE & .CSV file:
+        * DisplayName
+        * UserPrincipalName
+        * AccountEnabled
+        * Email Address Count
+          * if count = 1 then display name instead of number
+        * Group Count
+          * if count = 1 then display name instead of number
