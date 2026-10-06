@@ -17,6 +17,7 @@ $disabledUsers = Get-MgUser `
     -ErrorAction Stop
 
 
+Write-Host "Loading account." -ForegroundColor Yellow -NoNewline
 $results = @(
     foreach ($user in $disabledUsers) {
         # Write-Host "`nUser: $($user.DisplayName)" -ForegroundColor Cyan
@@ -62,8 +63,11 @@ $results = @(
             Groups            = $groupDisplay
         }
         $result
+        Write-Host "." -ForegroundColor Yellow -NoNewline
     }
 )
+
+Write-Host ""
 
 if ($results.Count -eq 0) {
     Write-Host "No users with sign-in disabled were found." -ForegroundColor Yellow
@@ -72,8 +76,23 @@ if ($results.Count -eq 0) {
     
 
 # Display the report in the console
+# $results |
+# Format-Table -AutoSize -Wrap
+
+
+# Display the report in the console
 $results |
-Format-Table -AutoSize -Wrap
+    Format-Table `
+        DisplayName, `
+        UserPrincipalName, `
+        AccountEnabled, `
+        @{Name = "Email Address Count"; Expression = { $_.SMTPAddresses }; Alignment = "Center"}, `
+        @{Name = "Group Count"; Expression = { $_.SMTPAddresses }; Alignment = "Center"} `
+        -AutoSize `
+        -Wrap
+
+
+
 
 # Export the same report to CSV
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
