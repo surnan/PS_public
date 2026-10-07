@@ -56,3 +56,10 @@
     - Output:
     * CONSOLE:
         * All inbox and exchange rules for mailflow
+  
+* Get_UserLoginActivity.ps1
+    - Prompt for primary email address & integer (n)
+    - Output:
+    * CONSOLE:
+        * all the login attempts by user in n days
+  
