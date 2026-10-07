@@ -49,3 +49,10 @@
           * if count = 1 then display name instead of number
         * Group Count
           * if count = 1 then display name instead of number
+
+
+* Get_UserInboxRules.ps1
+    - Prompt for primary email address.
+    - Output:
+    * CONSOLE:
+        * All inbox and exchange rules for mailflow
