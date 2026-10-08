@@ -1,133 +1,234 @@
-# Don't create connection if it already exists
-$connection = Get-ConnectionInformation -ErrorAction SilentlyContinue |
-Where-Object { $_.State -eq "Connected" }
+# Get-TeamsUserMembership.ps1
+# Lists direct Teams memberships and Owner/Member/Guest roles.
+# Does not add users or change any memberships.
+# Does not report individual channel memberships.
 
-if (-not $connection) {
-    #Don't install module if it already exists
-    if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-        Install-Module -Name ExchangeOnlineManagement -Scope CurrentUser -ErrorAction Stop
-    }
-    Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+$userEmail = (Read-Host "Enter user's email address").Trim()
+
+# Verify email format
+if ($userEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+    Write-Host "Invalid email format." -ForegroundColor Red
+    return
 }
 
+# Install/load required modules, then connect if necessary
+try {
+    $modules = @(
+        'Microsoft.Graph.Authentication'
+        'Microsoft.Graph.Users'
+        'Microsoft.Graph.Teams'
+    )
 
-# Prompt user for mailbox email address
-$userMailbox = Read-Host "Enter the user's email address"
-Write-Host "`nSearching mailbox permissions for: $userMailbox" -ForegroundColor Cyan
+    foreach ($module in $modules) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            Write-Host "Installing $module..." -ForegroundColor Yellow
 
+            Install-Module $module `
+                -Scope CurrentUser `
+                -ErrorAction Stop
+        }
 
-# Retrieve all mailboxes except the user's own mailbox
-# Don't need to check mailbox in check mailbox permissionloop
-$allMailboxes = @(
-    Get-EXOMailbox -ResultSize Unlimited -ErrorAction Stop |
-    Where-Object {
-        $_.PrimarySmtpAddress -ne $userMailbox
+        # Load Authentication before the other Graph modules
+        Import-Module $module -ErrorAction Stop
     }
-)
 
+    $requiredScopes = @(
+        'User.Read.All'
+        'Team.ReadBasic.All'
+        'TeamMember.Read.All'
+    )
 
-Write-Host "`nMailbox count = $($allMailboxes.Count)" -ForegroundColor Magenta
+    $context = Get-MgContext
 
+    $missingScopes = @(
+        $requiredScopes |
+            Where-Object { $_ -notin $context.Scopes }
+    )
 
-# Start timer
+    if (-not $context -or $missingScopes.Count -gt 0) {
+        Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
+
+        $connectionParameters = @{
+            Scopes       = $requiredScopes
+            ContextScope = 'Process'
+            NoWelcome    = $true
+            ErrorAction  = 'Stop'
+        }
+
+        # Reuse the existing tenant when requesting additional scopes
+        if ($context -and $context.TenantId) {
+            $connectionParameters.TenantId = $context.TenantId
+        }
+
+        Connect-MgGraph @connectionParameters
+    }
+}
+catch {
+    Write-Host "Unable to load modules or connect: $($_.Exception.Message)" `
+        -ForegroundColor Red
+    return
+}
+
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-
-# Display temporary progress message
-Write-Progress `
-    -Activity "Checking mailbox permissions" `
-    -Status "Scanning $($allMailboxes.Count) mailboxes using 5 parallel workers..."
-
-
-# Check mailbox permissions using parallel processing
 try {
+    # Resolve the user by sign-in address first
+    try {
+        $userAccount = Get-MgUser `
+            -UserId $userEmail `
+            -Property Id, DisplayName, UserPrincipalName `
+            -ErrorAction Stop
+    }
+    catch {
+        # Check primary email and aliases if the UPN lookup fails
+        $escapedEmail = $userEmail.Replace("'", "''")
 
-    # ForEach-Object better for parallel processing
+        $filter = (
+            "mail eq '$escapedEmail' or " +
+            "proxyAddresses/any(a:a eq 'smtp:$escapedEmail') or " +
+            "proxyAddresses/any(a:a eq 'SMTP:$escapedEmail')"
+        )
+
+        $matches = @(
+            Get-MgUser `
+                -Filter $filter `
+                -Property Id, DisplayName, UserPrincipalName `
+                -ConsistencyLevel eventual `
+                -CountVariable matchCount `
+                -All `
+                -ErrorAction Stop
+        )
+
+        if ($matches.Count -ne 1) {
+            Write-Host "Expected one user; found $($matches.Count) for $userEmail." `
+                -ForegroundColor Red
+            return
+        }
+
+        $userAccount = $matches[0]
+    }
+
+    Write-Host "`nRetrieving teams for $($userAccount.DisplayName)..." `
+        -ForegroundColor Yellow
+
+    $teams = @(
+        Get-MgUserJoinedTeam `
+            -UserId $userAccount.Id `
+            -All `
+            -ErrorAction Stop
+    )
+
+    if ($teams.Count -eq 0) {
+        Write-Host "No direct Teams memberships found." -ForegroundColor Yellow
+        return
+    }
+
+    $index = 0
+
     $results = @(
-        $allMailboxes | ForEach-Object -Parallel {
-            $currentMailbox = $_
-            # Parallel processing has different run spaces.  
-            # Not guaranteed to have access to main session variables
-            # $using: forces value into each runspace as $userEmail 
-            $userEmail = $using:userMailbox
+        foreach ($team in ($teams | Sort-Object DisplayName)) {
+            $index++
+
+            Write-Progress `
+                -Activity "Checking Teams membership roles" `
+                -Status "$index of $($teams.Count): $($team.DisplayName)" `
+                -PercentComplete (($index / $teams.Count) * 100)
+
+            $role = 'Unknown'
+            $status = 'OK'
+            $errorMessage = ''
 
             try {
-                $permissions = Get-EXOMailboxPermission `
-                    -Identity $currentMailbox.PrimarySmtpAddress `
-                    -User $userEmail `
-                    -ErrorAction Stop
+                # Retrieve only the entered user's membership record
+                $membership = @(
+                    Get-MgTeamMember `
+                        -TeamId $team.Id `
+                        -Filter "microsoft.graph.aadUserConversationMember/userId eq '$($userAccount.Id)'" `
+                        -All `
+                        -ErrorAction Stop
+                )
 
-                if ($permissions | Where-Object {
-                        $_.User -eq $userEmail -and
-                        $_.AccessRights -contains "FullAccess" -and
-                        -not $_.Deny
-                    }) {
-                    [PSCustomObject]@{
-                        Mailbox = [string]$currentMailbox.PrimarySmtpAddress
-                        Status  = "FullAccess"
-                        Error   = ""
-                    }
+                if ($membership.Count -ne 1) {
+                    throw "Expected one membership record; found $($membership.Count)."
+                }
+
+                if ('owner' -in $membership[0].Roles) {
+                    $role = 'Owner'
+                }
+                elseif ('guest' -in $membership[0].Roles) {
+                    $role = 'Guest'
+                }
+                else {
+                    $role = 'Member'
                 }
             }
             catch {
-                # Ignore expected errors when no permissions exist
-                if ($_.Exception.Message -match '"code":"NotFound"' -and
-                    $_.Exception.Message -match 'No permissions were found') {
-                    return
-                }
+                $status = 'Role lookup failed'
+                $errorMessage = $_.Exception.Message
 
-                # Return unexpected errors
-                [PSCustomObject]@{
-                    Mailbox = [string]$currentMailbox.PrimarySmtpAddress
-                    Status  = "Error"
-                    Error   = $_.Exception.Message
-                }
+                Write-Warning "Could not check role for $($team.DisplayName): $errorMessage"
             }
-        } -ThrottleLimit 5
+
+            [PSCustomObject]@{
+                DisplayName       = $userAccount.DisplayName
+                UserPrincipalName = $userAccount.UserPrincipalName
+                TeamName          = $team.DisplayName
+                Role              = $role
+                TeamId            = $team.Id
+                Status            = $status
+                Error             = $errorMessage
+            }
+        }
     )
 
+    Write-Progress -Activity "Checking Teams membership roles" -Completed
+
+    # Display team names and roles in the console
+    Write-Host "`nTeams for $($userAccount.DisplayName):" -ForegroundColor Cyan
+
+    $results |
+        Format-Table TeamName, Role, Status -AutoSize -Wrap
+
+    Write-Host "Total teams: $($results.Count)" -ForegroundColor Cyan
+
+    # Export detailed results alongside the script.
+    # If pasted into the terminal, use the current directory.
+    $outputDirectory = if ($PSScriptRoot) {
+        $PSScriptRoot
+    }
+    else {
+        (Get-Location).Path
+    }
+
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+    $safeUserName = $userAccount.UserPrincipalName -replace '[^a-zA-Z0-9._-]', '_'
+
+    $csvPath = Join-Path $outputDirectory `
+        "TeamsMembership_${safeUserName}_$timestamp.csv"
+
+    try {
+        $results |
+            Export-Csv `
+                -Path $csvPath `
+                -NoTypeInformation `
+                -Encoding UTF8 `
+                -ErrorAction Stop
+
+        Write-Host "`nCSV saved: $csvPath" -ForegroundColor Green
+    }
+    catch {
+        Write-Warning "Unable to export CSV: $($_.Exception.Message)"
+    }
+}
+catch {
+    Write-Host "Unable to complete report: $($_.Exception.Message)" `
+        -ForegroundColor Red
 }
 finally {
-    Write-Progress -Activity "Checking mailbox permissions" -Completed
+    Write-Progress -Activity "Checking Teams membership roles" -Completed
+
+    $stopwatch.Stop()
+
+    Write-Host "`nTotal execution time: $($stopwatch.Elapsed)" `
+        -ForegroundColor Cyan
 }
-
-
-# Get successful matches
-$fullAccess = @(
-    $results | Where-Object {
-        $_.Status -eq "FullAccess"
-    }
-)
-
-
-# Display Full Access mailboxes
-foreach ($result in $fullAccess) {
-    Write-Host "Full Access: $($result.Mailbox)" `
-        -ForegroundColor Green
-}
-
-
-################################################################
-###############
-# Get unexpected errors
-$errorsFound = @(
-    $results | Where-Object {
-        $_.Status -eq "Error"
-    }
-)
-# Display unexpected errors
-foreach ($result in $errorsFound) {
-    Write-Warning "Could not check $($result.Mailbox): $($result.Error)"
-}
-###############
-################################################################
-
-
-# Stop timer
-$stopwatch.Stop()
-
-
-# Display summary
-Write-Host "`nTotal Full Access matches: $($fullAccess.Count)" -ForegroundColor Magenta
-Write-Host "Unexpected errors: $($errorsFound.Count)" -ForegroundColor Yellow
-Write-Host "Total execution time: $($stopwatch.Elapsed)" -ForegroundColor Cyan
