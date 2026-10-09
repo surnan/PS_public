@@ -17,13 +17,13 @@ Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
 $connection = Get-MgContext
 if (-not $connection) {
     Connect-MgGraph `
-        -Scopes "User.Read.All", "Group.Read.All", "AuditLog.Read.All" `
+        -Scopes "User.Read.All", "Group.Read.All" `
         -NoWelcome `
         -ErrorAction Stop
 }
 
 ####################################################################################
-#################### All Microsoft Graph Powershell Scripts END ####################
+#################### Get Input Parameters ##########################################
 ####################################################################################
 
 $inputEmail = Read-Host "Enter group's email address"
@@ -32,9 +32,10 @@ if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
     exit
 }
 
-# =========================================================
-# FIND GROUP - Start
-# =========================================================
+
+####################################################################################
+#################### FIND targetGroup - Start ######################################
+####################################################################################
 
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 

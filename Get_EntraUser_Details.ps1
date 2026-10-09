@@ -1,25 +1,44 @@
-$userEmail = Read-Host "Enter user's email address"
+# Get_EntraUser_Details.ps1
+# Input = $inputEmail
+# Output = Display Name, Primary Email, Job Title, Creation Date/Time
+# Output = All email aliases
+# Output = All Group memberships (Name, Group Type, Group Email)
 
-# Verify email format
-if ($userEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host "Invalid email format." -ForegroundColor Red -BackgroundColor White
+####################################################################################
+#################### All Microsoft Graph Powershell Scripts START ##################
+####################################################################################
+
+if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
+    Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -ErrorAction Stop
+}
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+
+$connection = Get-MgContext
+if (-not $connection) {
+    Connect-MgGraph `
+        -Scopes "User.Read.All", "Group.Read.All"`
+        -NoWelcome `
+        -ErrorAction Stop
+}
+
+####################################################################################
+#################### Get Input Parameters ##########################################
+####################################################################################
+
+$inputEmail = Read-Host "Enter user's email address"
+if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+    Write-Host "Invalid email format." -ForegroundColor Red
     exit
 }
 
-# Connect to Microsoft Graph if necessary
-$context = Get-MgContext
-if (-not $context) {
-    Write-Host "Not connected to Microsoft Graph. Connecting..." -ForegroundColor Gray
-    Connect-MgGraph -Scopes `
-        "User.Read.All", `
-        "Group.Read.All"
-}
+####################################################################################
+#################### FIND targetUser - Start #######################################
+####################################################################################
 
-# Try to find user by UPN first
 try {
     #Get-MgUser cmdlet; "UserID" accepts GUID & UserPrincipalName
     $user = Get-MgUser `
-        -UserId $userEmail `
+        -UserId $inputEmail `
         -Property Id, DisplayName, UserPrincipalName, JobTitle, CreatedDateTime, ProxyAddresses `
         -ErrorAction Stop
 }
@@ -27,7 +46,7 @@ catch {
     # UPN lookup failed, now check aliases
     try {
         $user = Get-MgUser `
-            -Filter "proxyAddresses/any(address:address eq 'smtp:$userEmail')" `
+            -Filter "proxyAddresses/any(address:address eq 'smtp:$inputEmail')" `
             -Property Id, DisplayName, UserPrincipalName, JobTitle, CreatedDateTime, ProxyAddresses `
             -ErrorAction Stop
     }
