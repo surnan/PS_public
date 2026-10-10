@@ -83,7 +83,6 @@ if (-not $targetGroup) {
 ####################################################################################
 #################### BUILD GROUP DETAILS OBJECT ####################################
 ####################################################################################
-# Building object for Output
 $tgDetails = [PSCustomObject]@{
     Name      = $targetGroup.DisplayName
     Email     = $targetGroup.Mail
@@ -128,7 +127,6 @@ $tgDetails = [PSCustomObject]@{
 
 
 
-    
 ####################################################################################
 #################### CONSOLE OUTPUT ################################################
 ####################################################################################
@@ -139,7 +137,6 @@ Write-Host $tgDetails.Email
 Write-Host ("{0,-20}" -f "Group Type:") -ForegroundColor Green -NoNewline
 Write-Host $tgDetails.GroupType
 
-# No table, so each array element also newLine
 Write-Host "`nEmail Aliases:" -ForegroundColor Green
 if ($tgDetails.Aliases.Count -gt 0) {
     $tgDetails.Aliases | 
@@ -150,7 +147,6 @@ else {
 }
 
 Write-Host "`n{Group Members Table}" -ForegroundColor Green
-
 if ($tgDetails.Members.Count -gt 0) {
     $tgDetails.Members |
     Sort-Object Name |
@@ -210,7 +206,6 @@ catch {
 ####################################################################################
 #################### EXECUTION TIME ################################################
 ####################################################################################
-
 Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
 Write-Host "Get_EntraGroup_Members.ps1" -ForegroundColor Cyan
 
