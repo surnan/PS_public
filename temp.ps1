@@ -1,234 +1,201 @@
-# Get-TeamsUserMembership.ps1
-# Lists direct Teams memberships and Owner/Member/Guest roles.
-# Does not add users or change any memberships.
-# Does not report individual channel memberships.
+# Get_EntraGroup_Members.ps1
+# Input = $inputEmail
+# Output = Display Name, Primary Email, Group Type
+# Output = All email aliases
+# Output = Each member (play Name, UPN, Primary Email Address)
 
-$userEmail = (Read-Host "Enter user's email address").Trim()
 
-# Verify email format
-if ($userEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host "Invalid email format." -ForegroundColor Red
+####################################################################################
+#################### All Microsoft Graph Powershell Scripts START ##################
+####################################################################################
+if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
+    Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -ErrorAction Stop
+}
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+
+$connection = Get-MgContext
+if (-not $connection) {
+    Connect-MgGraph `
+        -Scopes "User.Read.All", "Group.Read.All" `
+        -NoWelcome `
+        -ErrorAction Stop
+}
+
+
+####################################################################################
+#################### Get Input Parameters ##########################################
+####################################################################################
+$inputEmail = Read-Host "Enter group's email address"
+if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+    Write-Host "Invalid email format (1)" -ForegroundColor Red
     return
 }
 
-# Install/load required modules, then connect if necessary
+
+####################################################################################
+#################### FIND targetGroup - Start ######################################
+####################################################################################
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew() 
+
 try {
-    $modules = @(
-        'Microsoft.Graph.Authentication'
-        'Microsoft.Graph.Users'
-        'Microsoft.Graph.Teams'
-    )
-
-    foreach ($module in $modules) {
-        if (-not (Get-Module -ListAvailable -Name $module)) {
-            Write-Host "Installing $module..." -ForegroundColor Yellow
-
-            Install-Module $module `
-                -Scope CurrentUser `
-                -ErrorAction Stop
-        }
-
-        # Load Authentication before the other Graph modules
-        Import-Module $module -ErrorAction Stop
-    }
-
-    $requiredScopes = @(
-        'User.Read.All'
-        'Team.ReadBasic.All'
-        'TeamMember.Read.All'
-    )
-
-    $context = Get-MgContext
-
-    $missingScopes = @(
-        $requiredScopes |
-            Where-Object { $_ -notin $context.Scopes }
-    )
-
-    if (-not $context -or $missingScopes.Count -gt 0) {
-        Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
-
-        $connectionParameters = @{
-            Scopes       = $requiredScopes
-            ContextScope = 'Process'
-            NoWelcome    = $true
-            ErrorAction  = 'Stop'
-        }
-
-        # Reuse the existing tenant when requesting additional scopes
-        if ($context -and $context.TenantId) {
-            $connectionParameters.TenantId = $context.TenantId
-        }
-
-        Connect-MgGraph @connectionParameters
-    }
+    $targetGroup = Get-MgGroup `
+        -Filter "mail eq '$inputEmail'" `
+        -Property Id, DisplayName, Mail, ProxyAddresses, GroupTypes, MailEnabled, SecurityEnabled `
+        -ErrorAction Stop
 }
 catch {
-    Write-Host "Unable to load modules or connect: $($_.Exception.Message)" `
-        -ForegroundColor Red
+    # Throws on MicrosoftGraph error.  NOT triggered if no match found
+    Write-Warning "Microsoft Graph error (2): $($_.Exception.Message)"
     return
 }
 
-$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-
-try {
-    # Resolve the user by sign-in address first
+# Check Alias emails if targetGroup not found
+if (-not $targetGroup) {
+    Write-Host "Not found as primary email. Checking aliases..." -ForegroundColor Yellow
     try {
-        $userAccount = Get-MgUser `
-            -UserId $userEmail `
-            -Property Id, DisplayName, UserPrincipalName `
+        # SMTP = primary; smtp = alias
+        $targetGroup = Get-MgGroup `
+            -Filter "proxyAddresses/any(address:address eq 'smtp:$inputEmail')" `
+            -Property Id, DisplayName, Mail, ProxyAddresses, GroupTypes, MailEnabled, SecurityEnabled `
             -ErrorAction Stop
     }
     catch {
-        # Check primary email and aliases if the UPN lookup fails
-        $escapedEmail = $userEmail.Replace("'", "''")
-
-        $filter = (
-            "mail eq '$escapedEmail' or " +
-            "proxyAddresses/any(a:a eq 'smtp:$escapedEmail') or " +
-            "proxyAddresses/any(a:a eq 'SMTP:$escapedEmail')"
-        )
-
-        $matches = @(
-            Get-MgUser `
-                -Filter $filter `
-                -Property Id, DisplayName, UserPrincipalName `
-                -ConsistencyLevel eventual `
-                -CountVariable matchCount `
-                -All `
-                -ErrorAction Stop
-        )
-
-        if ($matches.Count -ne 1) {
-            Write-Host "Expected one user; found $($matches.Count) for $userEmail." `
-                -ForegroundColor Red
-            return
-        }
-
-        $userAccount = $matches[0]
-    }
-
-    Write-Host "`nRetrieving teams for $($userAccount.DisplayName)..." `
-        -ForegroundColor Yellow
-
-    $teams = @(
-        Get-MgUserJoinedTeam `
-            -UserId $userAccount.Id `
-            -All `
-            -ErrorAction Stop
-    )
-
-    if ($teams.Count -eq 0) {
-        Write-Host "No direct Teams memberships found." -ForegroundColor Yellow
+        # Throws on MicrosoftGraph error.  NOT triggered if no match found
+        Write-Warning "Microsoft Graph error (3): $($_.Exception.Message)"
         return
     }
+}
 
-    $index = 0
+if (-not $targetGroup) {
+    Write-Host "No group found with email address (4): $inputEmail" -ForegroundColor Red
+    return
+}
 
-    $results = @(
-        foreach ($team in ($teams | Sort-Object DisplayName)) {
-            $index++
 
-            Write-Progress `
-                -Activity "Checking Teams membership roles" `
-                -Status "$index of $($teams.Count): $($team.DisplayName)" `
-                -PercentComplete (($index / $teams.Count) * 100)
+####################################################################################
+#################### Target Group found.  Load all aliases #########################
+####################################################################################
+# SMTP = primary; smtp = alias
+$tgAliases = $targetGroup.ProxyAddresses |
+Where-Object { $_ -cmatch '^smtp:' } |
+ForEach-Object { $_ -replace '^smtp:', '' }
 
-            $role = 'Unknown'
-            $status = 'OK'
-            $errorMessage = ''
+####################################################################################
+#################### DETERMINE GROUP TYPE - Start ##################################
+####################################################################################
+if ($targetGroup.GroupTypes -contains "Unified") {
+    $tgType = "Microsoft 365"
+}
+elseif ($targetGroup.MailEnabled -and $targetGroup.SecurityEnabled) {
+    $tgType = "Mail-enabled Security"
+}
+elseif ($targetGroup.MailEnabled -and -not $targetGroup.SecurityEnabled) {
+    $tgType = "Distribution"
+}
+elseif (-not $targetGroup.MailEnabled -and $targetGroup.SecurityEnabled) {
+    $tgType = "Security"
+} 
+else {
+    $tgType = "Unknown"
+}
 
-            try {
-                # Retrieve only the entered user's membership record
-                $membership = @(
-                    Get-MgTeamMember `
-                        -TeamId $team.Id `
-                        -Filter "microsoft.graph.aadUserConversationMember/userId eq '$($userAccount.Id)'" `
-                        -All `
-                        -ErrorAction Stop
-                )
+####################################################################################
+#################### OUTPUT - start ################################################
+####################################################################################
+$stopwatch.Stop()
 
-                if ($membership.Count -ne 1) {
-                    throw "Expected one membership record; found $($membership.Count)."
-                }
+Write-Host ("`n{0,-18}" -f "Group Name:") -ForegroundColor Green -NoNewline
+Write-Host $targetGroup.DisplayName
 
-                if ('owner' -in $membership[0].Roles) {
-                    $role = 'Owner'
-                }
-                elseif ('guest' -in $membership[0].Roles) {
-                    $role = 'Guest'
-                }
-                else {
-                    $role = 'Member'
-                }
-            }
-            catch {
-                $status = 'Role lookup failed'
-                $errorMessage = $_.Exception.Message
+Write-Host ("{0,-18}" -f "Group Email:") -ForegroundColor Green -NoNewline
+Write-Host $targetGroup.Mail
 
-                Write-Warning "Could not check role for $($team.DisplayName): $errorMessage"
-            }
+Write-Host ("{0,-18}" -f "Group Type:") -ForegroundColor Green -NoNewline
+Write-Host $tgType
 
-            [PSCustomObject]@{
-                DisplayName       = $userAccount.DisplayName
-                UserPrincipalName = $userAccount.UserPrincipalName
-                TeamName          = $team.DisplayName
-                Role              = $role
-                TeamId            = $team.Id
-                Status            = $status
-                Error             = $errorMessage
-            }
-        }
-    )
+#Only one propery, so Sort-Object doesn't need property
+Write-Host "`nEmail Aliases:" -ForegroundColor Green
+if ($tgAliases) {
+    $tgAliases | Sort-Object
+}
+else {
+    Write-Host "No email aliases found." -ForegroundColor Yellow
+}
 
-    Write-Progress -Activity "Checking Teams membership roles" -Completed
-
-    # Display team names and roles in the console
-    Write-Host "`nTeams for $($userAccount.DisplayName):" -ForegroundColor Cyan
-
-    $results |
-        Format-Table TeamName, Role, Status -AutoSize -Wrap
-
-    Write-Host "Total teams: $($results.Count)" -ForegroundColor Cyan
-
-    # Export detailed results alongside the script.
-    # If pasted into the terminal, use the current directory.
-    $outputDirectory = if ($PSScriptRoot) {
-        $PSScriptRoot
-    }
-    else {
-        (Get-Location).Path
-    }
-
-    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
-    $safeUserName = $userAccount.UserPrincipalName -replace '[^a-zA-Z0-9._-]', '_'
-
-    $csvPath = Join-Path $outputDirectory `
-        "TeamsMembership_${safeUserName}_$timestamp.csv"
-
-    try {
-        $results |
-            Export-Csv `
-                -Path $csvPath `
-                -NoTypeInformation `
-                -Encoding UTF8 `
-                -ErrorAction Stop
-
-        Write-Host "`nCSV saved: $csvPath" -ForegroundColor Green
-    }
-    catch {
-        Write-Warning "Unable to export CSV: $($_.Exception.Message)"
-    }
+# Display group members
+Write-Host "`n`nGroup Members:" -ForegroundColor Green
+try {
+    $tgMembers = Get-MgGroupMemberAsUser `
+        -GroupId $targetGroup.Id `
+        -Property Id, DisplayName, UserPrincipalName, Mail `
+        -All `
+        -ErrorAction Stop
 }
 catch {
-    Write-Host "Unable to complete report: $($_.Exception.Message)" `
-        -ForegroundColor Red
+    Write-Host "Unable to retrieve group members (5)" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
 }
-finally {
-    Write-Progress -Activity "Checking Teams membership roles" -Completed
 
-    $stopwatch.Stop()
-
-    Write-Host "`nTotal execution time: $($stopwatch.Elapsed)" `
-        -ForegroundColor Cyan
+if ($tgMembers) {
+    $memberResults = foreach ($member in $tgMembers) {
+        [PSCustomObject]@{
+            "Name"  = $member.DisplayName
+            "UPN"   = $member.UserPrincipalName
+            "Email" = $member.Mail
+        }
+    }
+    $memberResults |
+    Sort-Object Name |
+    Format-Table -AutoSize
 }
+else {
+    $memberResults = @()
+    Write-Host "No user members found in this group." -ForegroundColor Yellow
+}
+
+
+
+
+
+
+
+####################################################################################
+#################### Create CSV ####################################################
+####################################################################################
+$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+$groupNameSafe = $targetGroup.DisplayName -replace '[^\w\.-]', '_'
+$csvPath = ".\GroupDetails_${groupNameSafe}_$timestamp.csv"
+
+"Group Name,$($targetGroup.DisplayName)" | Out-File -FilePath $csvPath -Encoding utf8
+"Group Email,$($targetGroup.Mail)" | Out-File -FilePath $csvPath -Append -Encoding utf8
+"Group Type,$tgType" | Out-File -FilePath $csvPath -Append -Encoding utf8
+"" | Out-File -FilePath $csvPath -Append -Encoding utf8
+"Email Aliases" | Out-File -FilePath $csvPath -Append -Encoding utf8
+
+# Aliases
+if ($tgAliases) {
+    foreach ($alias in ($tgAliases | Sort-Object)) {
+        $alias | Out-File -FilePath $csvPath -Append -Encoding utf8
+    }
+}
+else {
+    "No email aliases found." | Out-File -FilePath $csvPath -Append -Encoding utf8
+}
+
+
+# Groupmembers
+"" | Out-File -FilePath $csvPath -Append -Encoding utf8
+"Name,UPN,Email" | Out-File -FilePath $csvPath -Append -Encoding utf8
+if ($memberResults) {
+    foreach ($memberResult in ($memberResults | Sort-Object Name)) {
+        "$($memberResult.Name),$($memberResult.UPN),$($memberResult.Email)" | Out-File -FilePath $csvPath -Append -Encoding utf8
+    }
+}
+
+
+
+
+Write-Host "`nCSV file created:" -ForegroundColor Green
+Write-Host $csvPath
+Write-Host "`nTotal execution time: $($stopwatch.Elapsed)" -ForegroundColor Cyan

@@ -1,263 +1,247 @@
-$groupEmail = Read-Host "Enter group's email address"
+# Get_EntraGroup_Members.ps1
+# Input: Group email address (primary email or alias)
+#
+# Output:
+#   Group Name
+#   Group Email
+#   Group Type
+#   All Email Aliases
+#   Group Members (Name, UPN, Email)
+#
+# Export:
+#   CSV: group details, aliases, and members
 
 
-# Verify email format
-if ($groupEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host "Invalid email format." -ForegroundColor Red
-    exit
+####################################################################################
+#################### All Microsoft Graph Powershell Scripts START ##################
+####################################################################################
+if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
+    Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -ErrorAction Stop
+}
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+
+$connection = Get-MgContext
+if (-not $connection) {
+    Connect-MgGraph `
+        -Scopes "User.Read.All", "Group.Read.All" `
+        -NoWelcome `
+        -ErrorAction Stop
 }
 
 
-# Connect to Microsoft Graph if necessary
-$context = Get-MgContext
-if (-not $context) {
-    Write-Host "Not connected to Microsoft Graph. Connecting..." -ForegroundColor Gray
-    Connect-MgGraph -Scopes `
-        "Group.Read.All", `
-        "User.Read.All"
+####################################################################################
+#################### GET INPUT PARAMETERS ##########################################
+####################################################################################
+$inputEmail = (Read-Host "Enter group's email address").Trim()
+if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+    Write-Host "Invalid email format (1)" -ForegroundColor Red
+    return
 }
 
 
-# =========================================================
-# FIND GROUP
-# =========================================================
+####################################################################################
+#################### FIND TARGET GROUP #############################################
+####################################################################################
 
-$group = $null
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew() 
 
 try {
-    # Checking primary email address
-    $group = Get-MgGroup `
-        -Filter "mail eq '$groupEmail'" `
+    $targetGroup = Get-MgGroup `
+        -Filter "mail eq '$inputEmail'" `
         -Property Id, DisplayName, Mail, ProxyAddresses, GroupTypes, MailEnabled, SecurityEnabled `
         -ErrorAction Stop
 }
 catch {
-    Write-Host "Primary email lookup failed." -ForegroundColor Yellow
+    # Throws on MicrosoftGraph error.  NOT triggered if no match found
+    Write-Warning "Microsoft Graph error (2): $($_.Exception.Message)"
+    return
 }
 
-
-# If not found by primary email, check aliases
-if (-not $group) {
-
-    Write-Host "Not found by primary email. Checking aliases..." -ForegroundColor Yellow
-
+# Check Alias emails if targetGroup not found
+if (-not $targetGroup) {
+    Write-Host "Not found as primary email. Checking aliases..." -ForegroundColor Yellow
     try {
-
-        $group = Get-MgGroup `
-            -Filter "proxyAddresses/any(address:address eq 'smtp:$groupEmail')" `
+        # SMTP = primary; smtp = alias
+        $targetGroup = Get-MgGroup `
+            -Filter "proxyAddresses/any(address:address eq 'smtp:$inputEmail')" `
             -Property Id, DisplayName, Mail, ProxyAddresses, GroupTypes, MailEnabled, SecurityEnabled `
             -ErrorAction Stop
-
     }
     catch {
-
-        Write-Host "Alias lookup failed." -ForegroundColor Red
-        Write-Host $_.Exception.Message -ForegroundColor Red
-        exit
+        # Throws on MicrosoftGraph error.  NOT triggered if no match found
+        Write-Warning "Microsoft Graph error (3): $($_.Exception.Message)"
+        return
     }
 }
 
-
-if (-not $group) {
-
-    Write-Host "No group was found with email address $groupEmail" -ForegroundColor Red
-    exit
+# targetGroup not found
+if (-not $targetGroup) {
+    Write-Host "No group found with email address (4): $inputEmail" -ForegroundColor Red
+    return
 }
 
 
-# =========================================================
-# DETERMINE GROUP TYPE
-# =========================================================
+####################################################################################
+#################### DETERMINE GROUP TYPE ##########################################
+####################################################################################
 
-if ($group.GroupTypes -contains "Unified") {
-    $groupType = "Microsoft 365"
+if ($targetGroup.GroupTypes -contains "Unified") {
+    $tgType = "Microsoft 365"
 }
-elseif ($group.MailEnabled -and $group.SecurityEnabled) {
-    $groupType = "Mail-enabled Security"
+elseif ($targetGroup.MailEnabled -and $targetGroup.SecurityEnabled) {
+    $tgType = "Mail-enabled Security"
 }
-elseif ($group.MailEnabled -and -not $group.SecurityEnabled) {
-    $groupType = "Distribution"
+elseif ($targetGroup.MailEnabled -and -not $targetGroup.SecurityEnabled) {
+    $tgType = "Distribution"
 }
-elseif (-not $group.MailEnabled -and $group.SecurityEnabled) {
-    $groupType = "Security"
-}
-else {
-    $groupType = "Unknown"
-}
-
-
-# =========================================================
-# GET GROUP ALIASES
-# =========================================================
-
-$aliases = $group.ProxyAddresses |
-    Where-Object { $_ -cmatch '^smtp:' } |
-    ForEach-Object { $_ -replace '^smtp:', '' }
-
-
-# =========================================================
-# DISPLAY GROUP INFORMATION
-# =========================================================
-
-Write-Host ""
-Write-Host "Group found:" -ForegroundColor DarkBlue
-
-Write-Host ("{0,-18}" -f "Group Name:") -ForegroundColor Green -NoNewline
-Write-Host $group.DisplayName
-
-Write-Host ("{0,-18}" -f "Group Email:") -ForegroundColor Green -NoNewline
-Write-Host $group.Mail
-
-Write-Host ("{0,-18}" -f "Group Type:") -ForegroundColor Green -NoNewline
-Write-Host $groupType
-
-
-Write-Host ""
-Write-Host "Email Aliases:" -ForegroundColor Green
-
-if ($aliases) {
-
-    $aliases | Sort-Object
-
+elseif (-not $targetGroup.MailEnabled -and $targetGroup.SecurityEnabled) {
+    $tgType = "Security"
 }
 else {
-
-    Write-Host "No email aliases found." -ForegroundColor Yellow
-
+    $tgType = "Unknown"
 }
 
 
-# =========================================================
-# GET GROUP MEMBERS
-# =========================================================
-
-Write-Host ""
-Write-Host "Group Members:" -ForegroundColor Green
-
+####################################################################################
+#################### RETRIEVE GROUP MEMBERS ########################################
+####################################################################################
 
 try {
-    $members = Get-MgGroupMemberAsUser `
-        -GroupId $group.Id `
-        -Property Id, DisplayName, UserPrincipalName, Mail `
-        -All `
-        -ErrorAction Stop
+    $tgMembers = @(
+        Get-MgGroupMemberAsUser `
+            -GroupId $targetGroup.Id `
+            -Property Id, DisplayName, UserPrincipalName, Mail `
+            -All `
+            -ErrorAction Stop
+    )
 }
 catch {
-    Write-Host "Unable to retrieve group members." -ForegroundColor Red
+    Write-Host "Unable to retrieve group members (5)." -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
-    exit
+    return
 }
 
 
-if ($members) {
-    $memberResults = foreach ($member in $members) {
-        [PSCustomObject]@{
-            "Name"  = $member.DisplayName
-            "UPN"   = $member.UserPrincipalName
-            "Email" = $member.Mail
+####################################################################################
+#################### BUILD GROUP DETAILS OBJECT ####################################
+####################################################################################
+
+# One parent object containing all group information
+$tgDetails = [PSCustomObject]@{
+    Name      = $targetGroup.DisplayName
+    Email     = $targetGroup.Mail
+    GroupType = $tgType
+
+    Aliases   = @(
+        $targetGroup.ProxyAddresses |
+        Where-Object { $_ -cmatch '^smtp:' } |
+        ForEach-Object { $_ -creplace '^smtp:', '' } |
+        Sort-Object
+    )
+
+    Members   = @(
+        foreach ($member in $tgMembers) {
+            [PSCustomObject]@{
+                Name  = $member.DisplayName
+                UPN   = $member.UserPrincipalName
+                Email = $member.Mail
+            }
         }
-    }
-    $memberResults |
-        Sort-Object Name |
-        Format-Table -AutoSize
+    )
+}
+
+
+####################################################################################
+#################### CONSOLE OUTPUT ################################################
+####################################################################################
+
+Write-Host ("`n{0,-18}" -f "Group Name:") -ForegroundColor Green -NoNewline
+Write-Host $tgDetails.Name
+Write-Host ("{0,-18}" -f "Group Email:") -ForegroundColor Green -NoNewline
+Write-Host $tgDetails.Email
+Write-Host ("{0,-18}" -f "Group Type:") -ForegroundColor Green -NoNewline
+Write-Host $tgDetails.GroupType
+
+
+# No table, so each array element also newLine
+Write-Host "`nEmail Aliases:" -ForegroundColor Green
+if ($tgDetails.Aliases.Count -gt 0) {
+    $tgDetails.Aliases | 
+    Out-Host
 }
 else {
-    $memberResults = @()
-    Write-Host "No user members found in this group." -ForegroundColor Yellow
+    Write-Host "No email aliases found." -ForegroundColor Yellow
 }
 
 
-# =========================================================
-# CREATE CSV REPORT
-# =========================================================
+Write-Host "`nGroup Members:" -ForegroundColor Green
+
+if ($tgDetails.Members.Count -gt 0) {
+    $tgDetails.Members |
+    Sort-Object Name |
+    Format-Table -AutoSize |
+    Out-Host
+}
+else {
+    Write-Host "No user members found in this group." `
+        -ForegroundColor Yellow
+}
+
+####################################################################################
+#################### CREATE CSV ####################################################
+####################################################################################
 
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-$groupNameSafe = $group.DisplayName -replace '[^\w\.-]', '_'
+$groupNameSafe = $tgDetails.Name -replace '[^\w\.-]', '_'
 $csvPath = ".\GroupDetails_${groupNameSafe}_$timestamp.csv"
 
-# Group information
-"Group Name,$($group.DisplayName)" |
-    Out-File `
-        -FilePath $csvPath `
-        -Encoding utf8
-
-"Group Email,$($group.Mail)" |
-    Out-File `
-        -FilePath $csvPath `
-        -Append `
-        -Encoding utf8
-
-"Group Type,$groupType" |
-    Out-File `
-        -FilePath $csvPath `
-        -Append `
-        -Encoding utf8
+try {
+    @(
+        "Group Name,$($tgDetails.Name)"
+        "Group Email,$($tgDetails.Email)"
+        "Group Type,$($tgDetails.GroupType)"
+        ""
+        "Email Aliases"
+    ) | Set-Content -Path $csvPath -Encoding utf8
 
 
-# Blank line
-"" |
-    Out-File `
-        -FilePath $csvPath `
-        -Append `
-        -Encoding utf8
-
-# Email aliases
-"Email Aliases" |
-    Out-File `
-        -FilePath $csvPath `
-        -Append `
-        -Encoding utf8
-
-if ($aliases) {
-
-    foreach ($alias in ($aliases | Sort-Object)) {
-
-        $alias |
-            Out-File `
-                -FilePath $csvPath `
-                -Append `
-                -Encoding utf8
+    if ($tgDetails.Aliases.Count -gt 0) {
+        $tgDetails.Aliases |
+        Add-Content -Path $csvPath -Encoding utf8
     }
-}
-else {
-    "No email aliases found." |
-        Out-File `
-            -FilePath $csvPath `
-            -Append `
-            -Encoding utf8
-}
-
-
-# Blank line
-"" |
-    Out-File `
-        -FilePath $csvPath `
-        -Append `
-        -Encoding utf8
-
-# Group members table header
-"Name,UPN,Email" |
-    Out-File `
-        -FilePath $csvPath `
-        -Append `
-        -Encoding utf8
-
-# Group member data
-if ($memberResults) {
-    foreach ($memberResult in ($memberResults | Sort-Object Name)) {
-        "$($memberResult.Name),$($memberResult.UPN),$($memberResult.Email)" |
-            Out-File `
-                -FilePath $csvPath `
-                -Append `
-                -Encoding utf8
+    else {
+        "No email aliases found." |
+        Add-Content -Path $csvPath -Encoding utf8
     }
+
+
+    "" | Add-Content -Path $csvPath -Encoding utf8
+
+    if ($tgDetails.Members.Count -gt 0) {
+        $tgDetails.Members |
+        Sort-Object Name |
+        ConvertTo-Csv -NoTypeInformation |
+        Add-Content -Path $csvPath -Encoding utf8
+    }
+    else {
+        "Name,UPN,Email" |
+        Add-Content -Path $csvPath -Encoding utf8
+    }
+
+    Write-Host "`nCSV file created:" -ForegroundColor Green
+    Write-Host (Resolve-Path $csvPath)
+}
+catch {
+    Write-Host "Unable to create CSV file: $($_.Exception.Message)" `
+        -ForegroundColor Red
 }
 
 
-# =========================================================
-# FINISHED
-# =========================================================
+####################################################################################
+#################### EXECUTION TIME ################################################
+####################################################################################
 
-Write-Host ""
-Write-Host "CSV file created:" -ForegroundColor Green
-Write-Host $csvPath
+$stopwatch.Stop()
+
+Write-Host "`nTotal execution time: $($stopwatch.Elapsed)" `
+    -ForegroundColor Cyan
