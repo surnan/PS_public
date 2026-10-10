@@ -81,53 +81,27 @@ if (-not $targetGroup) {
 
 
 ####################################################################################
-#################### DETERMINE GROUP TYPE ##########################################
-####################################################################################
-$tgType = if ($targetGroup.GroupTypes -contains "Unified") {
-    "Microsoft 365"
-}
-elseif ($targetGroup.MailEnabled -and $targetGroup.SecurityEnabled) {
-    "Mail-enabled Security"
-}
-elseif ($targetGroup.MailEnabled) {
-    "Distribution"
-}
-elseif ($targetGroup.SecurityEnabled) {
-    "Security"
-}
-else {
-    "Unknown"
-}
-
-
-
-####################################################################################
-#################### RETRIEVE GROUP MEMBERS ########################################
-####################################################################################
-try {
-    $tgMembers = @(
-        Get-MgGroupMemberAsUser `
-            -GroupId $targetGroup.Id `
-            -Property Id, DisplayName, UserPrincipalName, Mail `
-            -All `
-            -ErrorAction Stop
-    )
-}
-catch {
-    Write-Host "Unable to retrieve group members (5)." -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
-    return
-}
-
-
-####################################################################################
 #################### BUILD GROUP DETAILS OBJECT ####################################
 ####################################################################################
-# Building object for Output
 $tgDetails = [PSCustomObject]@{
     Name      = $targetGroup.DisplayName
     Email     = $targetGroup.Mail
-    GroupType = $tgType
+
+    GroupType = if ($targetGroup.GroupTypes -contains "Unified") {
+        "Microsoft 365"
+    }
+    elseif ($targetGroup.MailEnabled -and $targetGroup.SecurityEnabled) {
+        "Mail-enabled Security"
+    }
+    elseif ($targetGroup.MailEnabled) {
+        "Distribution"
+    }
+    elseif ($targetGroup.SecurityEnabled) {
+        "Security"
+    }
+    else {
+        "Unknown"
+    }
 
     Aliases   = @(
         $targetGroup.ProxyAddresses |
@@ -136,32 +110,33 @@ $tgDetails = [PSCustomObject]@{
         Sort-Object
     )
 
-    Members   = @(
-        foreach ($member in $tgMembers) {
+    Members = @(
+        Get-MgGroupMemberAsUser `
+            -GroupId $targetGroup.Id `
+            -Property DisplayName, UserPrincipalName `
+            -All `
+            -ErrorAction Stop |
+        ForEach-Object {
             [PSCustomObject]@{
-                Name  = $member.DisplayName
-                UPN   = $member.UserPrincipalName
-                Email = $member.Mail
+                Name  = $_.DisplayName
+                UPN   = $_.UserPrincipalName
             }
         }
     )
 }
-    
-    
+
+
+
 ####################################################################################
 #################### CONSOLE OUTPUT ################################################
 ####################################################################################
-$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-
-Write-Host ("`n{0,-18}" -f "Group Name:") -ForegroundColor Green -NoNewline
+Write-Host ("`n{0,-20}" -f "Group Name:") -ForegroundColor Green -NoNewline
 Write-Host $tgDetails.Name
-Write-Host ("{0,-18}" -f "Group Email:") -ForegroundColor Green -NoNewline
+Write-Host ("{0,-20}" -f "Group Email:") -ForegroundColor Green -NoNewline
 Write-Host $tgDetails.Email
-Write-Host ("{0,-18}" -f "Group Type:") -ForegroundColor Green -NoNewline
+Write-Host ("{0,-20}" -f "Group Type:") -ForegroundColor Green -NoNewline
 Write-Host $tgDetails.GroupType
 
-
-# No table, so each array element also newLine
 Write-Host "`nEmail Aliases:" -ForegroundColor Green
 if ($tgDetails.Aliases.Count -gt 0) {
     $tgDetails.Aliases | 
@@ -172,7 +147,6 @@ else {
 }
 
 Write-Host "`n{Group Members Table}" -ForegroundColor Green
-
 if ($tgDetails.Members.Count -gt 0) {
     $tgDetails.Members |
     Sort-Object Name |
@@ -187,6 +161,7 @@ else {
 #################### CREATE CSV ####################################################
 ####################################################################################
 $stopwatch.Stop()
+$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 
 # [^\w\.-] === Not {letter/number/underscore/period/hyphen}
 $groupName_2_fileName = $tgDetails.Name -replace '[^\w\.-]', '_'
@@ -231,7 +206,6 @@ catch {
 ####################################################################################
 #################### EXECUTION TIME ################################################
 ####################################################################################
-
 Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
 Write-Host "Get_EntraGroup_Members.ps1" -ForegroundColor Cyan
 
