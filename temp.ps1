@@ -1,45 +1,191 @@
-$userEmail = Read-Host "Enter user's email address"
+# Get_EntraUser_Details.ps1
+# Input = $inputEmail
+# Output = Display Name, Primary Email, Job Title, Creation Date/Time
+# Output = All email aliases
+# Output = All Group memberships (Name, Group Type, Group Email)
 
-# Verify email format
-if ($userEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host "Invalid email format." -ForegroundColor Red -BackgroundColor White
-    exit
+
+####################################################################################
+#################### All Microsoft Graph Powershell Scripts START ##################
+####################################################################################
+if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
+    Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -ErrorAction Stop
+}
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+
+$connection = Get-MgContext
+if (-not $connection) {
+    Connect-MgGraph `
+        -Scopes "User.Read.All", "Group.Read.All"`
+        -NoWelcome `
+        -ErrorAction Stop
 }
 
-# Connect to Microsoft Graph if necessary
-$context = Get-MgContext
-if (-not $context) {
-    Write-Host "Not connected to Microsoft Graph. Connecting..." -ForegroundColor Gray
-    Connect-MgGraph -Scopes `
-        "User.Read.All", `
-        "Group.Read.All"
+
+####################################################################################
+#################### Get Input Parameters ##########################################
+####################################################################################
+$inputEmail = Read-Host "Enter user's email address"
+if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+    Write-Host "Invalid email format (1)" -ForegroundColor Red
+    return
 }
 
-# Try to find user by UPN first
+
+####################################################################################
+#################### FIND targetUser - Start #######################################
+####################################################################################
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
 try {
-    #Get-MgUser cmdlet; "UserID" accepts GUID & UserPrincipalName
-    $user = Get-MgUser `
-        -UserId $userEmail `
-        -Property Id, DisplayName, UserPrincipalName, JobTitle, CreatedDateTime, ProxyAddresses `
+    # Users have UPN and it can be altered to not match primary email.
+    # Search both UPN & Mail properties
+    # ConvergeDirect vs ConvergeMarketing
+    $targetUser = Get-MgUser `
+        -Filter "userPrincipalName eq '$inputEmail' or mail eq '$inputEmail'" `
+        -Property Id, DisplayName, UserPrincipalName, Mail, JobTitle, CreatedDateTime, ProxyAddresses `
         -ErrorAction Stop
 }
 catch {
-    # UPN lookup failed, now check aliases
+    # Throws on MicrosoftGraph error.  NOT triggered if no match found
+    Write-Warning "Microsoft Graph error (2): $($_.Exception.Message)"
+    return
+}
+
+# Check Alias emails if targetUser not found
+if (-not $targetUser) {
+    Write-Host "Not found as primary email or UPN. Checking aliases..." -ForegroundColor Yellow
     try {
-        $user = Get-MgUser `
-            -Filter "proxyAddresses/any(address:address eq 'smtp:$userEmail')" `
-            -Property Id, DisplayName, UserPrincipalName, JobTitle, CreatedDateTime, ProxyAddresses `
+        # SMTP = primary; smtp = alias
+        $targetUser = Get-MgUser `
+            -Filter "proxyAddresses/any(address:address eq 'smtp:$inputEmail')" `
+            -Property Id, DisplayName, UserPrincipalName, Mail, JobTitle, CreatedDateTime, ProxyAddresses `
             -ErrorAction Stop
     }
     catch {
-        $user = $null
-        Write-Host "Alias lookup failed." -ForegroundColor Yellow
-        Write-Host $_.Exception.Message -ForegroundColor Red
+        # Throws on MicrosoftGraph error.  NOT triggered if no match found
+        Write-Warning "Microsoft Graph error (3): $($_.Exception.Message)"
+        return
     }
 }
 
+if (-not $targetUser) {
+    Write-Host "No user found with email address (4): $inputEmail" -ForegroundColor Red
+    return
+}
 
-if ($user) {
+# Only users have UPN & email property
+# Email address for one user can be UPN for another account
+# Check for multiple matches
+##### Not default behavior
+if (@($targetUser).Count -gt 1) {
+    Write-Warning "Multiple users matched this email address (5)"
+    $targetUser | Select-Object DisplayName, UserPrincipalName, Mail |
+    Format-Table -AutoSize
+    return
+}
+
+
+####################################################################################
+#################### Target User found.  Load all aliases ##########################
+####################################################################################
+# SMTP = primary; smtp = alias
+$targetAliases = $targetUser.ProxyAddresses |
+Where-Object { $_ -cmatch "^smtp:" } |
+ForEach-Object { $_ -replace "^smtp:", "" }
+
+
+####################################################################################
+#################### FIND Groups containing targetUser -Start ######################
+####################################################################################
+try {
+    # "-All" avoids pagination when query return multiple pages
+    $targetUGroups = Get-MgUserMemberOf `
+        -UserId $targetUser.Id `
+        -All `
+        -ErrorAction Stop
+}
+catch {
+    # Throws on MicrosoftGraph error.  NOT triggered if no match found
+    Write-Warning "Microsoft Graph error: $($_.Exception.Message)"
+    return
+}
+
+####################################################################################
+################ FIND Details for each Group containing targetUser -Start ##########
+####################################################################################
+if ($targetUGroups) {
+    $targetUGDetails = foreach ($group in $targetUGroups) {
+
+        $groupDetails = Get-MgGroup `
+            -GroupId $group.Id `
+            -Property DisplayName, GroupTypes, MailEnabled, SecurityEnabled, Mail `
+            -ErrorAction SilentlyContinue
+
+        if ($groupDetails) {
+
+            # Determine group type
+            if ($groupDetails.GroupTypes -contains "Unified") {
+                $groupType = "Microsoft 365"
+            }
+            elseif ($groupDetails.MailEnabled -and $groupDetails.SecurityEnabled) {
+                $groupType = "Mail-enabled Security"
+            }
+            elseif ($groupDetails.MailEnabled -and -not $groupDetails.SecurityEnabled) {
+                $groupType = "Distribution"
+            }
+            elseif (-not $groupDetails.MailEnabled -and $groupDetails.SecurityEnabled) {
+                $groupType = "Security"
+            }
+            else {
+                $groupType = "Unknown"
+            }
+                
+            # Create object for $groupResults
+            $groupResult = [PSCustomObject]@{
+                "Group Name"  = $groupDetails.DisplayName
+                "Group Type"  = $groupType
+                "Group Email" = $groupDetails.Mail
+            }
+            # Output goes to console if it's not captured
+            # ForEach loop captures $groupResult for $groupResults 
+            $groupResult
+        }
+    }
+    $targetUGDetails |
+    Sort-Object "Group Name" |
+    Format-Table -AutoSize
+}
+
+
+
+
+
+# }
+# else {
+#     $groupResults = @()
+#     Write-Host "User is not a member of any groups." -ForegroundColor Yellow
+# }
+# catch {
+#     $groupResults = @()
+#     Write-Host "Unable to retrieve group memberships." -ForegroundColor Red
+#     Write-Host $_.Exception.Message -ForegroundColor Red
+# }
+
+
+
+
+
+
+
+# if ($aliases) {$aliases | Sort-Object} #$aliases elements have Only one propery
+
+
+# Write-Host "`nGroup Memberships Below:" -ForegroundColor Green
+
+
+
+if ($targetUser) {  
     # =========================================================
     # USER INFORMATION
     # =========================================================
@@ -47,205 +193,61 @@ if ($user) {
     Write-Host "User found in Entra:" -ForegroundColor DarkBlue
 
     Write-Host ("{0,-20}" -f "Name:") -ForegroundColor Green -NoNewline
-    Write-Host $user.DisplayName
+    Write-Host $targetUser.DisplayName
 
     Write-Host ("{0,-20}" -f "UPN:") -ForegroundColor Green -NoNewline
-    Write-Host $user.UserPrincipalName
+    Write-Host $targetUser.UserPrincipalName
 
     Write-Host ("{0,-20}" -f "Job Title:") -ForegroundColor Green -NoNewline
-    Write-Host $user.JobTitle
+    Write-Host $targetUser.JobTitle
 
     Write-Host ("{0,-20}" -f "Creation Date/Time:") -ForegroundColor Green -NoNewline
-    Write-Host $user.CreatedDateTime
+    Write-Host $targetUser.CreatedDateTime
 
 
-    # =========================================================
-    # EMAIL ALIASES
-    # =========================================================
-    Write-Host ""
-    Write-Host "Email Aliases:" -ForegroundColor Green
-
-    #SMTP = primary; smtp = alias
-    $aliases = $user.ProxyAddresses |
-        Where-Object { $_ -cmatch "^smtp:" } |
-        ForEach-Object { $_ -replace "^smtp:", "" }
-
-    #Only one propery, so Sort-Object doesn't need property
-    if ($aliases) {
-        $aliases | Sort-Object
-    }
-    else {
-        Write-Host "No email aliases found." -ForegroundColor Yellow
-    }
 
 
-    # =========================================================
-    # GROUP MEMBERSHIPS
-    # =========================================================
-
-
-    Write-Host ""
-    Write-Host "Group Memberships Below:" -ForegroundColor Green
-
-    try {
-        # $groups = Groups w/ $user.Id as member
-        # "-All" avoids pagination when query return multiple
-        $groups = Get-MgUserMemberOf `
-            -UserId $user.Id `
-            -All `
-            -ErrorAction Stop
-
-        if ($groups) {
-            # Determine group type
-            $groupResults = foreach ($group in $groups) {
-
-                $groupDetails = Get-MgGroup `
-                    -GroupId $group.Id `
-                    -Property DisplayName, GroupTypes, MailEnabled, SecurityEnabled, Mail `
-                    -ErrorAction SilentlyContinue
-
-                if ($groupDetails) {
-
-                    # Determine group type
-                    if ($groupDetails.GroupTypes -contains "Unified") {
-                        $groupType = "Microsoft 365"
-                    }
-                    elseif ($groupDetails.MailEnabled -and $groupDetails.SecurityEnabled) {
-                        $groupType = "Mail-enabled Security"
-                    }
-                    elseif ($groupDetails.MailEnabled -and -not $groupDetails.SecurityEnabled) {
-                        $groupType = "Distribution"
-                    }
-                    elseif (-not $groupDetails.MailEnabled -and $groupDetails.SecurityEnabled) {
-                        $groupType = "Security"
-                    }
-                    else {
-                        $groupType = "Unknown"
-                    }
-                    
-                    # Create object for $groupResults
-                    $groupResult = [PSCustomObject]@{
-                        "Group Name"  = $groupDetails.DisplayName
-                        "Group Type"  = $groupType
-                        "Group Email" = $groupDetails.Mail
-                    }
-                    # Output goes to console if it's not captured
-                    # ForEach loop captures $groupResult for $groupResults 
-                    $groupResult
-                }
-            }
-            $groupResults |
-                Sort-Object "Group Name" |
-                Format-Table -AutoSize
-        }
-        else {
-            $groupResults = @()
-            Write-Host "User is not a member of any groups." -ForegroundColor Yellow
-        }
-    }
-    catch {
-        $groupResults = @()
-        Write-Host "Unable to retrieve group memberships." -ForegroundColor Red
-        Write-Host $_.Exception.Message -ForegroundColor Red
-    }
+ 
 
     # =========================================================
     # CREATE CSV REPORT
     # =========================================================
 
     $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-
-    $userName = $user.UserPrincipalName.Split("@")[0]
-
+    $userName = $targetUser.UserPrincipalName.Split("@")[0]
     $csvPath = ".\UserDetails_${userName}_$timestamp.csv"
 
-
     # User information
-    "Name,$($user.DisplayName)" |
-        Out-File `
-            -FilePath $csvPath `
-            -Encoding utf8
+    "Name,$($targetUser.DisplayName)" | Out-File -FilePath $csvPath -Encoding utf8
+    "UPN,$($targetUser.UserPrincipalName)" | Out-File -FilePath $csvPath -Append -Encoding utf8
+    "Job Title,$($targetUser.JobTitle)" | Out-File -FilePath $csvPath -Append -Encoding utf8
+    "Creation Date/Time,$($targetUser.CreatedDateTime)" | Out-File -FilePath $csvPath -Append -Encoding utf8
+    "" | Out-File -FilePath $csvPath -Append -Encoding utf8
+    "Email Aliases" | Out-File -FilePath $csvPath -Append -Encoding utf8
 
-    "UPN,$($user.UserPrincipalName)" |
-        Out-File `
-            -FilePath $csvPath `
-            -Append `
-            -Encoding utf8
-
-    "Job Title,$($user.JobTitle)" |
-        Out-File `
-            -FilePath $csvPath `
-            -Append `
-            -Encoding utf8
-
-    "Creation Date/Time,$($user.CreatedDateTime)" |
-        Out-File `
-            -FilePath $csvPath `
-            -Append `
-            -Encoding utf8
-
-
-    # Blank line
-    "" |
-        Out-File `
-            -FilePath $csvPath `
-            -Append `
-            -Encoding utf8
-
-
-    # Email aliases
-    "Email Aliases" |
-        Out-File `
-            -FilePath $csvPath `
-            -Append `
-            -Encoding utf8
-
-    if ($aliases) {
-
-        foreach ($alias in ($aliases | Sort-Object)) {
-
-            $alias |
-                Out-File `
-                    -FilePath $csvPath `
-                    -Append `
-                    -Encoding utf8
+    if ($targetAliases) {
+        foreach ($alias in ($targetAliases | Sort-Object)) {
+            $alias | Out-File -FilePath $csvPath -Append -Encoding utf8
         }
     }
     else {
         "No email aliases found." |
-            Out-File `
-                -FilePath $csvPath `
-                -Append `
-                -Encoding utf8
+        Out-File -FilePath $csvPath -Append -Encoding utf8
     }
 
 
-    # Blank line
-    "" |
-        Out-File `
-            -FilePath $csvPath `
-            -Append `
-            -Encoding utf8
+    "" | Out-File -FilePath $csvPath -Append -Encoding utf8
 
 
     # Group table header
-    "Group Name,Group Type,Group Email" |
-        Out-File `
-            -FilePath $csvPath `
-            -Append `
-            -Encoding utf8
+    "Group Name,Group Type,Group Email" | Out-File -FilePath $csvPath -Append -Encoding utf8
 
 
     # Group data
-    if ($groupResults) {
-
-        foreach ($groupResult in ($groupResults | Sort-Object "Group Name")) {
-
+    if ($targetUGDetails) {
+        foreach ($groupResult in ($targetUGDetails | Sort-Object "Group Name")) {
             "$($groupResult.'Group Name'),$($groupResult.'Group Type'),$($groupResult.'Group Email')" |
-                Out-File `
-                    -FilePath $csvPath `
-                    -Append `
-                    -Encoding utf8
+            Out-File -FilePath $csvPath -Append -Encoding utf8
         }
     }
 
@@ -254,8 +256,9 @@ if ($user) {
     # FINISHED
     # =========================================================
 
-    Write-Host ""
-    Write-Host "CSV file created:" -ForegroundColor Green
+    $stopwatch.Stop()
+    Write-Host "`nTotal execution time: $($stopwatch.Elapsed)" -ForegroundColor Cyan
+    Write-Host "`nCSV file created:" -ForegroundColor Green
     Write-Host $csvPath
 }
 else {
