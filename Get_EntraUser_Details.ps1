@@ -42,7 +42,7 @@ if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
 
 
 ####################################################################################
-#################### FIND targetUser - Start #######################################
+#################### FIND TARGET USER ##############################################
 ####################################################################################
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -91,15 +91,12 @@ if (@($targetUser).Count -gt 1) {
 }
 
 
-
-
-
 ####################################################################################
-#################### FIND Groups containing targetUser -Start ######################
+#################### FIND GROUPS CONTAINING TARGET USER ############################
 ####################################################################################
 try {
     # "-All" avoids pagination when query return multiple pages
-    $targetUGroups = Get-MgUserMemberOf `
+    $tuAllGroups = Get-MgUserMemberOf `
         -UserId $targetUser.Id `
         -All `
         -ErrorAction Stop
@@ -111,9 +108,9 @@ catch {
 }
 
 ####################################################################################
-################ FIND Details for each Group containing targetUser -Start ##########
+################ FIND DETAILS FOR GROUPS CONTAINING TARGET USER ####################
 ####################################################################################
-$targetUGDetails = $targetUGroups | ForEach-Object { 
+$tuagDetails = $tuAllGroups | ForEach-Object { 
     $groupDetails = Get-MgGroup `
         -GroupId $_.Id `
         -Property DisplayName, GroupTypes, MailEnabled, SecurityEnabled, Mail `
@@ -146,36 +143,49 @@ $targetUGDetails = $targetUGroups | ForEach-Object {
     }
 }
 
+####################################################################################
+#################### BUILD USER DETAILS OBJECT ####################################
+####################################################################################
+$tuDetails = [PSCustomObject]@{
+    Name            = $targetUser.DisplayName
+    UPN             = $targetUser.UserPrincipalName
+    JobTitle        = $targetUser.JobTitle
+    CreatedDateTime = $targetUser.CreatedDateTime
+
+    Aliases         = @(
+        $targetUser.ProxyAddresses |
+        Where-Object { $_ -cmatch "^smtp:" } |
+        ForEach-Object { $_ -replace "^smtp:", "" } |
+        Sort-Object
+    )
+    
+    AllGroups       = @(
+        foreach ($member in $tuagDetails) {
+            [PSCustomObject]@{
+                Name  = $member.DisplayName
+                Email = $member.Mail
+                GroupType = $member."Group Type"
+            }
+        }
+    )
+}
+
+
+
 
 ####################################################################################
-#################### Find User's Email Aliases #####################################
+#################### CONSOLE OUTPUT ################################################
 ####################################################################################
-# SMTP = primary; smtp = alias
-$targetAliases = $targetUser.ProxyAddresses |
-Where-Object { $_ -cmatch "^smtp:" } |
-ForEach-Object { $_ -replace "^smtp:", "" }
-
-####################################################################################
-#################### OUTPUT - start ################################################
-####################################################################################
-$stopwatch.Stop()
-
-Write-Host "`nUser found in Entra:" -ForegroundColor DarkBlue
-
 Write-Host ("{0,-20}" -f "Name:") -ForegroundColor Green -NoNewline
 Write-Host $targetUser.DisplayName
-
 Write-Host ("{0,-20}" -f "UPN:") -ForegroundColor Green -NoNewline
 Write-Host $targetUser.UserPrincipalName
-
 Write-Host ("{0,-20}" -f "Job Title:") -ForegroundColor Green -NoNewline
 Write-Host $targetUser.JobTitle
-
 Write-Host ("{0,-20}" -f "Creation Date/Time:") -ForegroundColor Green -NoNewline
 Write-Host $targetUser.CreatedDateTime
 
 Write-Host "`nEmail Aliases:" -ForegroundColor Cyan
-
 if ($targetAliases) {
     $targetAliases |
     Sort-Object |
@@ -187,8 +197,8 @@ else {
 
 Write-Host "`nGroup Memberships:" -ForegroundColor Cyan
 
-if ($targetUGDetails) {
-    $targetUGDetails |
+if ($tuagDetails) {
+    $tuagDetails |
     Sort-Object "Group Name" |
     Format-Table "Group Name", "Group Type", "Group Email" -AutoSize
 }
@@ -204,7 +214,6 @@ Write-Host $csvPath
 # =========================================================
 # CREATE CSV REPORT
 # =========================================================
-
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 $userName = $targetUser.UserPrincipalName.Split("@")[0]
 $csvPath = ".\UserDetails_${userName}_$timestamp.csv"
@@ -236,9 +245,40 @@ else {
 
 
 # Group data
-if ($targetUGDetails) {
-    foreach ($groupResult in ($targetUGDetails | Sort-Object "Group Name")) {
+if ($tuagDetails) {
+    foreach ($groupResult in ($tuagDetails | Sort-Object "Group Name")) {
         "$($groupResult.'Group Name'),$($groupResult.'Group Type'),$($groupResult.'Group Email')" |
         Out-File -FilePath $csvPath -Append -Encoding utf8
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ####################################################################################
+# #################### Find User's Email Aliases #####################################
+# ####################################################################################
+# # SMTP = primary; smtp = alias
+# $targetAliases = $targetUser.ProxyAddresses |
+# Where-Object { $_ -cmatch "^smtp:" } |
+# ForEach-Object { $_ -replace "^smtp:", "" }
