@@ -9,7 +9,7 @@
 #   Group Members (Name, UPN, Email)
 #
 # Export:
-#   CSV: group details, aliases, and members
+#   CSV: Same Output
 
 
 ####################################################################################
@@ -146,11 +146,12 @@ $tgDetails = [PSCustomObject]@{
         }
     )
 }
-
-
+    
+    
 ####################################################################################
 #################### CONSOLE OUTPUT ################################################
 ####################################################################################
+$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 
 Write-Host ("`n{0,-18}" -f "Group Name:") -ForegroundColor Green -NoNewline
 Write-Host $tgDetails.Name
@@ -185,14 +186,15 @@ else {
 ####################################################################################
 #################### CREATE CSV ####################################################
 ####################################################################################
+$stopwatch.Stop()
 
-$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-# [^\w\.-] --> any character not {letter/number/underscore/period/hyphen}
+# [^\w\.-] === Not {letter/number/underscore/period/hyphen}
 $groupName_2_fileName = $tgDetails.Name -replace '[^\w\.-]', '_'
 $csvPath = ".\GroupDetails_${groupName_2_fileName}_$timestamp.csv"
 
 try {
     @(
+        "File Name, $($csvPath)"
         "Group Name,$($tgDetails.Name)"
         "Group Email,$($tgDetails.Email)"
         "Group Type,$($tgDetails.GroupType)"
@@ -220,9 +222,6 @@ try {
         "Name,UPN,Email" |
         Add-Content -Path $csvPath -Encoding utf8
     }
-    
-    Write-Host "`nCSV file created:" -ForegroundColor Green
-    Write-Host (Resolve-Path $csvPath)
 }
 catch {
     Write-Host "Unable to create CSV file: $($_.Exception.Message)" -ForegroundColor Red
@@ -232,5 +231,12 @@ catch {
 ####################################################################################
 #################### EXECUTION TIME ################################################
 ####################################################################################
-$stopwatch.Stop()
-Write-Host "`nTotal execution time: $($stopwatch.Elapsed)" -ForegroundColor Cyan
+
+Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
+Write-Host "Get_EntraGroup_Members.ps1" -ForegroundColor Cyan
+
+Write-Host ("{0,-25}" -f "CSV file generated:") -ForegroundColor DarkYellow -NoNewline
+Write-Host (Resolve-Path $csvPath) -ForegroundColor DarkYellow
+
+Write-Host ("{0,-25}" -f "Total Execution Time:") -ForegroundColor DarkGreen -NoNewline
+Write-Host "($stopwatch.Elapsed)" -ForegroundColor DarkGreen
