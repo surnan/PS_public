@@ -108,43 +108,7 @@ catch {
 }
 
 ####################################################################################
-################ FIND DETAILS FOR GROUPS CONTAINING TARGET USER ####################
-####################################################################################
-$tuagDetails = $tuAllGroups | ForEach-Object { 
-    $groupDetails = Get-MgGroup `
-        -GroupId $_.Id `
-        -Property DisplayName, GroupTypes, MailEnabled, SecurityEnabled, Mail `
-        -ErrorAction SilentlyContinue
-
-    if ($groupDetails) {
-        $groupResult = [PSCustomObject]@{
-            "Group Name"  = $groupDetails.DisplayName
-            "Group Email" = $groupDetails.Mail
-        }
-
-        $groupType = if ($targetGroup.GroupTypes -contains "Unified") {
-            "Microsoft 365"
-        }
-        elseif ($targetGroup.MailEnabled -and $targetGroup.SecurityEnabled) {
-            "Mail-enabled Security"
-        }
-        elseif ($targetGroup.MailEnabled) {
-            "Distribution"
-        }
-        elseif ($targetGroup.SecurityEnabled) {
-            "Security"
-        }
-        else {
-            "Unknown"
-        }
-
-        $groupResult | Add-Member -NotePropertyName "Group Type" -NotePropertyValue $groupType
-        $groupResult
-    }
-}
-
-####################################################################################
-#################### BUILD USER DETAILS OBJECT ####################################
+################# BUILD USER DETAILS OUTPUT OBJECT #################################
 ####################################################################################
 $tuDetails = [PSCustomObject]@{
     Name            = $targetUser.DisplayName
@@ -160,45 +124,67 @@ $tuDetails = [PSCustomObject]@{
     )
     
     AllGroups       = @(
-        foreach ($member in $tuagDetails) {
-            [PSCustomObject]@{
-                Name  = $member.DisplayName
-                Email = $member.Mail
-                GroupType = $member."Group Type"
+        $tuAllGroups | ForEach-Object { 
+            $groupDetails = Get-MgGroup `
+                -GroupId $_.Id `
+                -Property DisplayName, GroupTypes, MailEnabled, SecurityEnabled, Mail `
+                -ErrorAction SilentlyContinue
+
+            if ($groupDetails) {
+                $groupResult = [PSCustomObject]@{
+                    "Group Name"  = $groupDetails.DisplayName
+                    "Group Email" = $groupDetails.Mail
+                }
+
+                $groupType = if ($groupDetails.GroupTypes -contains "Unified") {
+                    "Microsoft 365"
+                }
+                elseif ($groupDetails.MailEnabled -and $groupDetails.SecurityEnabled) {
+                    "Mail-enabled Security"
+                }
+                elseif ($groupDetails.MailEnabled) {
+                    "Distribution"
+                }
+                elseif ($groupDetails.SecurityEnabled) {
+                    "Security"
+                }
+                else {
+                    "Unknown"
+                }
+
+                $groupResult | Add-Member -NotePropertyName "Group Type" -NotePropertyValue $groupType
+                $groupResult
             }
         }
     )
 }
 
 
-
-
 ####################################################################################
 #################### CONSOLE OUTPUT ################################################
 ####################################################################################
 Write-Host ("{0,-20}" -f "Name:") -ForegroundColor Green -NoNewline
-Write-Host $targetUser.DisplayName
+Write-Host $tuDetails.Name
 Write-Host ("{0,-20}" -f "UPN:") -ForegroundColor Green -NoNewline
-Write-Host $targetUser.UserPrincipalName
+Write-Host $tuDetails.UPN
 Write-Host ("{0,-20}" -f "Job Title:") -ForegroundColor Green -NoNewline
-Write-Host $targetUser.JobTitle
+Write-Host $tuDetails.JobTitle
 Write-Host ("{0,-20}" -f "Creation Date/Time:") -ForegroundColor Green -NoNewline
-Write-Host $targetUser.CreatedDateTime
+Write-Host $tuDetails.CreatedDateTime
 
 Write-Host "`nEmail Aliases:" -ForegroundColor Cyan
-if ($targetAliases) {
-    $targetAliases |
-    Sort-Object |
-    ForEach-Object { Write-Host $_ }
+if ($tuDetails.Aliases.Count -gt 0) {
+    $tuDetails.Aliases |
+    Out-Host
 }
 else {
     Write-Host "No email aliases found." -ForegroundColor Yellow
 }
 
-Write-Host "`nGroup Memberships:" -ForegroundColor Cyan
+Write-Host "`n{Group Memberships}" -ForegroundColor Cyan
 
-if ($tuagDetails) {
-    $tuagDetails |
+if ($tuDetails.AllGroups.Count -gt 0) {
+    $tuDetails.AllGroups |
     Sort-Object "Group Name" |
     Format-Table "Group Name", "Group Type", "Group Email" -AutoSize
 }
@@ -206,79 +192,67 @@ else {
     Write-Host "No group memberships found." -ForegroundColor Yellow
 }
 
-Write-Host "`nTotal execution time: $($stopwatch.Elapsed)" -ForegroundColor Cyan
-Write-Host "`nCSV file created:" -ForegroundColor Green
-Write-Host $csvPath
 
-
-# =========================================================
-# CREATE CSV REPORT
-# =========================================================
+####################################################################################
+#################### CREATE CSV ####################################################
+####################################################################################
+$stopwatch.Stop()
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-$userName = $targetUser.UserPrincipalName.Split("@")[0]
-$csvPath = ".\UserDetails_${userName}_$timestamp.csv"
 
-# User information
-"Name,$($targetUser.DisplayName)" | Out-File -FilePath $csvPath -Encoding utf8
-"UPN,$($targetUser.UserPrincipalName)" | Out-File -FilePath $csvPath -Append -Encoding utf8
-"Job Title,$($targetUser.JobTitle)" | Out-File -FilePath $csvPath -Append -Encoding utf8
-"Creation Date/Time,$($targetUser.CreatedDateTime)" | Out-File -FilePath $csvPath -Append -Encoding utf8
-"" | Out-File -FilePath $csvPath -Append -Encoding utf8
-"Email Aliases" | Out-File -FilePath $csvPath -Append -Encoding utf8
+$filename = $targetUser.UserPrincipalName.Split("@")[0]
+$csvPath = ".\UserDetails_${filename}_$timestamp.csv"
 
-if ($targetAliases) {
-    foreach ($alias in ($targetAliases | Sort-Object)) {
-        $alias | Out-File -FilePath $csvPath -Append -Encoding utf8
+try {
+    @(
+        "Name,$($tuDetails.Name)"
+        "UPN,$($tuDetails.UPN)"
+        "Job Title,$($tuDetails.JobTitle)"
+        "Creation Date/Time,$($tuDetails.CreatedDateTime)"
+        ""
+        "Email Aliases"
+    ) | Set-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
+
+    if ($tuDetails.Aliases.Count -gt 0) {
+        $tuDetails.Aliases |
+        Add-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
+    }
+    else {
+        "No email aliases found." |
+        Add-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
+    }
+
+    "" | Add-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
+
+    # Export group membership table
+    if ($tuDetails.AllGroups.Count -gt 0) {
+        $tuDetails.AllGroups |
+        Sort-Object "Group Name" |
+        Select-Object "Group Name", "Group Type", "Group Email" |
+        ConvertTo-Csv -NoTypeInformation |
+        Add-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
+    }
+    else {
+        "Group Name,Group Type,Group Email" |
+        Add-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
     }
 }
-else {
-    "No email aliases found." |
-    Out-File -FilePath $csvPath -Append -Encoding utf8
-}
-
-
-"" | Out-File -FilePath $csvPath -Append -Encoding utf8
-
-
-# Group table header
-"Group Name,Group Type,Group Email" | Out-File -FilePath $csvPath -Append -Encoding utf8
-
-
-# Group data
-if ($tuagDetails) {
-    foreach ($groupResult in ($tuagDetails | Sort-Object "Group Name")) {
-        "$($groupResult.'Group Name'),$($groupResult.'Group Type'),$($groupResult.'Group Email')" |
-        Out-File -FilePath $csvPath -Append -Encoding utf8
-    }
+catch {
+    Write-Host "Unable to create CSV file: $($_.Exception.Message)" -ForegroundColor Red
+    return
 }
 
 
 
 
 
+####################################################################################
+#################### EXECUTION TIME ################################################
+####################################################################################
+Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
+Write-Host "Get_EntraGroup_Members.ps1" -ForegroundColor Cyan
 
+Write-Host ("{0,-25}" -f "CSV file generated:") -ForegroundColor DarkYellow -NoNewline
+Write-Host (Resolve-Path $csvPath) -ForegroundColor DarkYellow
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ####################################################################################
-# #################### Find User's Email Aliases #####################################
-# ####################################################################################
-# # SMTP = primary; smtp = alias
-# $targetAliases = $targetUser.ProxyAddresses |
-# Where-Object { $_ -cmatch "^smtp:" } |
-# ForEach-Object { $_ -replace "^smtp:", "" }
+Write-Host ("{0,-25}" -f "Total Execution Time:") -ForegroundColor DarkGreen -NoNewline
+Write-Host "($stopwatch.Elapsed)" -ForegroundColor DarkGreen
