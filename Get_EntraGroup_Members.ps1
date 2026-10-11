@@ -1,3 +1,4 @@
+
 # Get_EntraGroup_Members.ps1
 # Input: Group email address (primary email or alias)
 #
@@ -13,19 +14,51 @@
 
 
 ####################################################################################
-#################### All Microsoft Graph Powershell Scripts START ##################
+#################### MICROSOFT GRAPH CONNECTION ####################################
 ####################################################################################
-if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
-    Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -ErrorAction Stop
-}
-Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
 
-$connection = Get-MgContext
-if (-not $connection) {
-    Connect-MgGraph `
-        -Scopes "User.Read.All", "Group.Read.All" `
-        -NoWelcome `
-        -ErrorAction Stop
+$modules = @(
+    "Microsoft.Graph.Users"
+    "Microsoft.Graph.Groups"
+)
+
+$requiredScopes = @("User.Read.All", "Group.Read.All")
+
+try {
+    foreach ($module in $modules) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            Install-Module $module -Scope CurrentUser -ErrorAction Stop
+        }
+        Import-Module $module -ErrorAction Stop
+    }
+
+    $connection = Get-MgContext
+    if (-not $connection) {
+        Connect-MgGraph `
+            -Scopes $requiredScopes `
+            -ContextScope CurrentUser `
+            -NoWelcome `
+            -ErrorAction Stop
+        $connection = Get-MgContext
+    }
+
+    if ($connection.AuthType -ne "Delegated") {
+        throw "A delegated Microsoft Graph connection is required."
+    }
+
+    $missingScopes = @($requiredScopes | Where-Object {
+            $_ -notin @($connection.Scopes)
+        }
+    )
+
+    if ($missingScopes.Count -gt 0) {
+        throw "Missing Graph scopes: $($missingScopes -join ', ')"
+    }
+}
+catch {
+    Write-Host "Microsoft Graph connection failed (1):" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
 }
 
 
@@ -34,7 +67,7 @@ if (-not $connection) {
 ####################################################################################
 $inputEmail = (Read-Host "Enter group's email address").Trim()
 if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host "Invalid email format (1)" -ForegroundColor Red
+    Write-Host "Invalid email format (1A)" -ForegroundColor Red
     return
 }
 
@@ -42,7 +75,7 @@ if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
 ####################################################################################
 #################### FIND TARGET GROUP #############################################
 ####################################################################################
-$stopwatch = [System.Diagnostics.Stopwatch]::StartNew() 
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
     $targetGroup = Get-MgGroup `
@@ -51,14 +84,14 @@ try {
         -ErrorAction Stop
 }
 catch {
-    # Throws on MicrosoftGraph error.  NOT triggered if no match found
     Write-Warning "Microsoft Graph error (2): $($_.Exception.Message)"
     return
 }
 
-# Check Alias emails if targetGroup not found
+# Check alias emails if targetGroup not found
 if (-not $targetGroup) {
     Write-Host "Not found as primary email. Checking aliases..." -ForegroundColor Yellow
+
     try {
         # SMTP = primary; smtp = alias
         $targetGroup = Get-MgGroup `
@@ -67,15 +100,31 @@ if (-not $targetGroup) {
             -ErrorAction Stop
     }
     catch {
-        # Throws on MicrosoftGraph error.  NOT triggered if no match found
         Write-Warning "Microsoft Graph error (3): $($_.Exception.Message)"
         return
     }
 }
 
-# targetGroup not found, invalid input
 if (-not $targetGroup) {
     Write-Host "No group found with email address (4): $inputEmail" -ForegroundColor Red
+    return
+}
+
+
+####################################################################################
+#################### GET GROUP MEMBERS #############################################
+####################################################################################
+try {
+    $groupMembers = @(
+        Get-MgGroupMemberAsUser `
+            -GroupId $targetGroup.Id `
+            -Property DisplayName, UserPrincipalName, Mail `
+            -All `
+            -ErrorAction Stop
+    )
+}
+catch {
+    Write-Host "Unable to retrieve group members (5): $($_.Exception.Message)" -ForegroundColor Red
     return
 }
 
@@ -110,21 +159,15 @@ $tgDetails = [PSCustomObject]@{
         Sort-Object
     )
 
-    Members = @(
-        Get-MgGroupMemberAsUser `
-            -GroupId $targetGroup.Id `
-            -Property DisplayName, UserPrincipalName `
-            -All `
-            -ErrorAction Stop |
-        ForEach-Object {
-            [PSCustomObject]@{
+    Members   = @($groupMembers |
+        ForEach-Object { [PSCustomObject]@{
                 Name  = $_.DisplayName
                 UPN   = $_.UserPrincipalName
+                Email = $_.Mail
             }
         }
     )
 }
-
 
 
 ####################################################################################
@@ -138,15 +181,16 @@ Write-Host ("{0,-20}" -f "Group Type:") -ForegroundColor Green -NoNewline
 Write-Host $tgDetails.GroupType
 
 Write-Host "`nEmail Aliases:" -ForegroundColor Green
+
 if ($tgDetails.Aliases.Count -gt 0) {
-    $tgDetails.Aliases | 
-    Out-Host
+    $tgDetails.Aliases | Out-Host
 }
 else {
     Write-Host "No email aliases found." -ForegroundColor Yellow
 }
 
 Write-Host "`n{Group Members Table}" -ForegroundColor Green
+
 if ($tgDetails.Members.Count -gt 0) {
     $tgDetails.Members |
     Sort-Object Name |
@@ -157,24 +201,27 @@ else {
     Write-Host "No user members found in this group." -ForegroundColor Yellow
 }
 
+
 ####################################################################################
 #################### CREATE CSV ####################################################
 ####################################################################################
-$stopwatch.Stop()
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 
-# [^\w\.-] === Not {letter/number/underscore/period/hyphen}
+# Replace invalid filename characters
 $groupName_2_fileName = $tgDetails.Name -replace '[^\w\.-]', '_'
 $csvPath = ".\GroupDetails_${groupName_2_fileName}_$timestamp.csv"
+$csvCreated = $false
 
 try {
     @(
         "Group Name,$($tgDetails.Name)"
         "Group Email,$($tgDetails.Email)"
         "Group Type,$($tgDetails.GroupType)"
-        ""
-        "Email Aliases"
     ) | Set-Content -Path $csvPath -Encoding utf8
+
+    # Email aliases
+    "" | Add-Content -Path $csvPath -Encoding utf8
+    "Email Aliases" | Add-Content -Path $csvPath -Encoding utf8
 
     if ($tgDetails.Aliases.Count -gt 0) {
         $tgDetails.Aliases |
@@ -185,16 +232,21 @@ try {
         Add-Content -Path $csvPath -Encoding utf8
     }
 
+    # Group members
     "" | Add-Content -Path $csvPath -Encoding utf8
+    "Group Members" | Add-Content -Path $csvPath -Encoding utf8
+
     if ($tgDetails.Members.Count -gt 0) {
         $tgDetails.Members |
         Sort-Object Name |
+        ConvertTo-Csv -NoTypeInformation |
         Add-Content -Path $csvPath -Encoding utf8
     }
     else {
         "Name,UPN,Email" |
         Add-Content -Path $csvPath -Encoding utf8
     }
+    $csvCreated = $true
 }
 catch {
     Write-Host "Unable to create CSV file: $($_.Exception.Message)" -ForegroundColor Red
@@ -204,11 +256,15 @@ catch {
 ####################################################################################
 #################### EXECUTION TIME ################################################
 ####################################################################################
+$stopwatch.Stop()
+
 Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
 Write-Host "Get_EntraGroup_Members.ps1" -ForegroundColor Cyan
 
-Write-Host ("{0,-25}" -f "CSV file generated:") -ForegroundColor DarkYellow -NoNewline
-Write-Host (Resolve-Path $csvPath) -ForegroundColor DarkYellow
+if ($csvCreated) {
+    Write-Host ("{0,-25}" -f "CSV file generated:") -ForegroundColor DarkYellow -NoNewline
+    Write-Host (Resolve-Path $csvPath) -ForegroundColor DarkYellow
+}
 
 Write-Host ("{0,-25}" -f "Total Execution Time:") -ForegroundColor DarkGreen -NoNewline
-Write-Host "($stopwatch.Elapsed)" -ForegroundColor DarkGreen
+Write-Host "($($stopwatch.Elapsed))" -ForegroundColor DarkGreen
