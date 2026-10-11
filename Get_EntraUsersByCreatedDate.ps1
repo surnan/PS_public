@@ -1,156 +1,164 @@
-function Convert_To_Date {
-    param (
-        [string]$DateString
-    )
+# Get_EntraUsersByCreatedDate.ps1
+# Input: Start Date and End Date (MM-DD-YYYY), blank = Today
+#
+# Output:
+#   Display Name
+#   UPN
+#   Job Title
+#   Created Date/Time
+#
+# Export:
+#   CSV: Same Output
+
+
+####################################################################################
+#################### All Microsoft Graph Powershell Scripts START ##################
+####################################################################################
+if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
+    Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -ErrorAction Stop
+}
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+
+$connection = Get-MgContext
+if (-not $connection) {
+    Connect-MgGraph `
+        -Scopes "User.Read.All"`
+        -NoWelcome `
+        -ErrorAction Stop
+}
+
+
+####################################################################################
+#################### GET INPUT PARAMETERS ##########################################
+####################################################################################
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$today = (Get-Date).Date
+
+function Read_Date {
+    param ([string]$Prompt)
+    $inputDate = Read-Host $Prompt
+
+    if ([string]::IsNullOrWhiteSpace($inputDate)) {
+        return $today
+    }
 
     try {
-        # [System.DateTime] from .NET
-        return [System.DateTime]::ParseExact(
-            $DateString,
-            "MM-dd-yyyy",
-            $null
-        )
+        [datetime]::ParseExact($inputDate, "MM-dd-yyyy", $null)
     }
     catch {
+        Write-Host "Invalid date value entered. Use MM-DD-YYYY." -ForegroundColor Red
         return $null
     }
 }
 
+$startDate = Read_Date "Enter start date (MM-DD-YYYY) or blank for today"
+if ($null -eq $startDate) { return }
 
-$today = (Get-Date).Date
-$startDateInput = Read-Host "Enter start date (MM-DD-YYYY) or blank for today"
-$endDateInput   = Read-Host "Enter end date (MM-DD-YYYY) or blank for today"
+$endDate = Read_Date "Enter end date (MM-DD-YYYY) or blank for today"
+if ($null -eq $endDate) { return }
 
-# String has value --> DateTime object.
-# String is blank --> use current date.
-# [System.String] <-- .NET String has method = "isNulll..."
-$startDate = [System.String]::IsNullOrWhiteSpace($startDateInput) `
-    ? $today `
-    : (Convert_To_Date $startDateInput)
-
-$endDate = [System.String]::IsNullOrWhiteSpace($endDateInput) `
-    ? $today `
-    : (Convert_To_Date $endDateInput)
-
-
-# Verify valid values for Start & End Dates
-if ($null -eq $startDate -or $null -eq $endDate) {
-    Write-Host "Invalid date value entered." -ForegroundColor Red
-    exit
-}
-
-
-# Don't allow future dates
 if ($startDate -gt $today -or $endDate -gt $today) {
     Write-Host "Date cannot be after today." -ForegroundColor Red
-    exit
+    return
 }
 
-
-# Verify Start Date not after End date
 if ($endDate -lt $startDate) {
     Write-Host "End date cannot be before start date." -ForegroundColor Red
-    exit
+    return
 }
 
 
-# Convert date into UTC ISO 8601 format for OData query
+####################################################################################
+#################### BUILD ODATA FILTER ############################################
+####################################################################################
 $startDateOData = $startDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
-# Forward to next day start and go backwards in smallest time unit
-# Forced to use Less than or Equal because Less than isn't available
-$endDateOData = $endDate.Date.AddDays(1).AddTicks(-1).ToUniversalTime().ToString(
-    "yyyy-MM-ddTHH:mm:ss.fffffffZ"
-)
+# Convoluted because Microsoft Graph accepts "le" and not "lt" for date comparisons
+$endDateOData = $endDate.Date.AddDays(1).AddTicks(-1).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
 
-
-# Building OData filter
 $filter = "createdDateTime ge $startDateOData and createdDateTime le $endDateOData"
 
 
-# Display selected dates
-# Write-Host ""
-# Write-Host "Start Date: " -ForegroundColor Blue -NoNewline
-# Write-Host $startDate.ToString("MM-dd-yyyy") -ForegroundColor Green
-# Write-Host "End Date: " -ForegroundColor Blue -NoNewline
-# Write-Host $endDate.ToString("MM-dd-yyyy") -ForegroundColor Green
-
-
-# Connect to Microsoft Graph if necessary
-$context = Get-MgContext
-
-if (-not $context) {
-    Write-Host ""
-    Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Yellow
-    Connect-MgGraph -Scopes "User.Read.All"
+####################################################################################
+#################### FIND TARGET ACCOUNTS ##########################################
+####################################################################################
+try {
+    $users = @(
+        Get-MgUser `
+            -Filter $filter `
+            -Property DisplayName, UserPrincipalName, JobTitle, CreatedDateTime `
+            -All `
+            -ErrorAction Stop
+    )
+}
+catch {
+    Write-Host "Microsoft Graph error: $($_.Exception.Message)" -ForegroundColor Red
+    return
 }
 
 
-# Query Entra users
+####################################################################################
+#################### BUILD RESULTS OBJECT ##########################################
+####################################################################################
+$results = [PSCustomObject]@{
+    startDate = $startDate
+    endDate = $endDate
+    allUsers = @($users | Sort-Object CreatedDateTime )
+}
+
+
+####################################################################################
+#################### CONSOLE OUTPUT ################################################
+####################################################################################
+Write-Host "`nUser accounts created between " -ForegroundColor Blue -NoNewline
+Write-Host $results.startDate -ForegroundColor Green -NoNewline
+Write-Host " and " -ForegroundColor Blue -NoNewline
+Write-Host $results.endDate -ForegroundColor Green
+Write-Host "`nTotal users found: $($results.allUsers.Count)" -ForegroundColor Yellow
+Write-Host ""
+
+if ($results.allUsers.Count -gt 0) {
+    $results.allUsers |
+    Format-Table DisplayName, UserPrincipalName, JobTitle, CreatedDateTime -AutoSize |
+    Out-Host
+}
+else {
+    Write-Host "`nNo user accounts were created within the specified date range." -ForegroundColor Yellow
+}
+
+
+####################################################################################
+#################### CREATE CSV ####################################################
+####################################################################################
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$startString = $results.startDate.ToString('yyyy-MM-dd')
+$endString = $results.endDate.ToString('yyyy-MM-dd')
+$csvPath = ".\EntraUsersByCreatedDate_${startString}_to_${endString}_$timestamp.csv"
+
 try {
-    $users = Get-MgUser `
-        -Filter $filter `
-        -Property DisplayName,UserPrincipalName,JobTitle,CreatedDateTime `
-        -All `
+    $results.allUsers |
+    Export-Csv `
+        -Path $csvPath `
+        -NoTypeInformation `
+        -Encoding utf8 `
         -ErrorAction Stop
 }
 catch {
-    Write-Host ""
-    Write-Host "Microsoft Graph query failed." -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
-    Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor Yellow
-    exit
+    Write-Host "Unable to create CSV file: $($_.Exception.Message)" -ForegroundColor Red
+    return
 }
 
-Write-Host ""
 
-if ($users) {
-    Write-Host "User accounts created between " -ForegroundColor Blue -NoNewline
-    Write-Host $startDate.ToString("MM-dd-yyyy") -ForegroundColor Green -NoNewline
-    Write-Host " and " -ForegroundColor Blue -NoNewline
-    Write-Host $endDate.ToString("MM-dd-yyyy") -ForegroundColor Green
+####################################################################################
+#################### EXECUTION TIME ################################################
+####################################################################################
+$stopwatch.Stop()
 
-    Write-Host ""
-    Write-Host "Total users found: $($users.Count)" -ForegroundColor Yellow
-    Write-Host ""
+Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
+Write-Host "Get_EntraUsersByCreatedDate.ps1" -ForegroundColor Cyan
 
+Write-Host ("{0,-25}" -f "CSV file generated:") -ForegroundColor DarkYellow -NoNewline
+Write-Host (Resolve-Path $csvPath) -ForegroundColor DarkYellow
 
-    # Create a reusable result set for both console output and CSV export
-    $results = $users |
-        Sort-Object CreatedDateTime |
-        Select-Object `
-            DisplayName,
-            UserPrincipalName,
-            JobTitle,
-            CreatedDateTime
-
-
-    # Print results to console
-    $results |
-        Format-Table `
-            DisplayName,
-            UserPrincipalName,
-            CreatedDateTime `
-            -AutoSize
-
-    # Build CSV filename
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $csvPath = ".\EntraUsersByCreatedDate_$($startDate.ToString('yyyy-MM-dd'))_to_" `
-                + "$($endDate.ToString('yyyy-MM-dd'))_$timestamp.csv"
-
-
-    # Export-Csv is PowerShell cmdlet
-    $results |
-        Export-Csv `
-            -Path $csvPath `
-            -NoTypeInformation
-
-
-    Write-Host ""
-    Write-Host "CSV created: " -ForegroundColor Blue -NoNewline
-    Write-Host $csvPath -ForegroundColor Green
-}
-else {
-
-    Write-Host "No user accounts were created during this date range." -ForegroundColor Yellow
-}
+Write-Host ("{0,-25}" -f "Total Execution Time:") -ForegroundColor DarkGreen -NoNewline
+Write-Host $stopwatch.Elapsed -ForegroundColor DarkGreen
