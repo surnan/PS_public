@@ -92,7 +92,7 @@ try {
     )
 }
 catch {
-    Write-Host "Microsoft Graph error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Microsoft Graph error (1): $($_.Exception.Message)" -ForegroundColor Red
     return
 }
 
@@ -144,7 +144,7 @@ try {
         -ErrorAction Stop
 }
 catch {
-    Write-Host "Unable to create CSV file: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Unable to create CSV file (2): $($_.Exception.Message)" -ForegroundColor Red
     return
 }
 

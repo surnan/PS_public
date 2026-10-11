@@ -103,7 +103,7 @@ try {
 }
 catch {
     # Throws on MicrosoftGraph error.  NOT triggered if no match found
-    Write-Warning "Microsoft Graph error: $($_.Exception.Message)"
+    Write-Warning "Microsoft Graph error (6): $($_.Exception.Message)"
     return
 }
 
@@ -237,7 +237,7 @@ try {
     }
 }
 catch {
-    Write-Host "Unable to create CSV file: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Unable to create CSV file (7): $($_.Exception.Message)" -ForegroundColor Red
     return
 }
 
