@@ -1,14 +1,12 @@
-# Get_EntraUser_Details.ps1
-# Input = User email address (primary email or alias or username)
+
+# Get_EntraUsersByCreatedDate.ps1
+# Input: Start Date and End Date (MM-DD-YYYY), blank = Today
 #
-# Output: 
+# Output:
 #   Display Name
-#   Username
-#   Primary Email Address
+#   UPN
 #   Job Title
-#   Creation Date/Time
-#   All Email Aliases
-#   Group Memberships (Name, Type, Primary Email)
+#   Created Date/Time
 #
 # Export:
 #   CSV: Same Output
@@ -25,287 +23,148 @@ Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
 $connection = Get-MgContext
 if (-not $connection) {
     Connect-MgGraph `
-        -Scopes "User.Read.All", "Group.Read.All"`
+        -Scopes "User.Read.All"`
         -NoWelcome `
         -ErrorAction Stop
 }
 
 
 ####################################################################################
-#################### Get Input Parameters ##########################################
-####################################################################################
-$inputEmail = Read-Host "Enter user's email address"
-if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host "Invalid email format (1)" -ForegroundColor Red
-    return
-}
-
-
-####################################################################################
-#################### FIND TARGET USER ##############################################
+#################### GET INPUT PARAMETERS ##########################################
 ####################################################################################
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$today = (Get-Date).Date
 
-try {
-    # Search both UPN & Mail properties
-    # ConvergeDirect vs ConvergeMarketing
-    $targetUser = Get-MgUser `
-        -Filter "userPrincipalName eq '$inputEmail' or mail eq '$inputEmail'" `
-        -Property Id, DisplayName, UserPrincipalName, Mail, JobTitle, CreatedDateTime, ProxyAddresses `
-        -ErrorAction Stop
-}
-catch {
-    # Throws on MicrosoftGraph error.  NOT triggered if no match found
-    Write-Warning "Microsoft Graph error (2): $($_.Exception.Message)"
-    return
-}
+function Read_Date {
+    param ([string]$Prompt)
+    $inputDate = Read-Host $Prompt
 
-# Check Alias emails if targetUser not found
-if (-not $targetUser) {
-    Write-Host "Not found as primary email or UPN. Checking aliases..." -ForegroundColor Yellow
+    if ([string]::IsNullOrWhiteSpace($inputDate)) {
+        return $today
+    }
+
     try {
-        # SMTP = primary; smtp = alias
-        $targetUser = Get-MgUser `
-            -Filter "proxyAddresses/any(address:address eq 'smtp:$inputEmail')" `
-            -Property Id, DisplayName, UserPrincipalName, Mail, JobTitle, CreatedDateTime, ProxyAddresses `
-            -ErrorAction Stop
+        [datetime]::ParseExact($inputDate, "MM-dd-yyyy", $null)
     }
     catch {
-        # Throws on MicrosoftGraph error.  NOT triggered if no match found
-        Write-Warning "Microsoft Graph error (3): $($_.Exception.Message)"
-        return
+        Write-Host "Invalid date value entered. Use MM-DD-YYYY." -ForegroundColor Red
+        return $null
     }
 }
 
-if (-not $targetUser) {
-    Write-Host "No user found with email address (4): $inputEmail" -ForegroundColor Red
+$startDate = Read_Date "Enter start date (MM-DD-YYYY) or blank for today"
+if ($null -eq $startDate) { return }
+
+$endDate = Read_Date "Enter end date (MM-DD-YYYY) or blank for today"
+if ($null -eq $endDate) { return }
+
+if ($startDate -gt $today -or $endDate -gt $today) {
+    Write-Host "Date cannot be after today." -ForegroundColor Red
     return
 }
 
-# Only users have UPN/username & email properties
-if (@($targetUser).Count -gt 1) {
-    Write-Warning "Multiple users matched this email address (5)"
-    $targetUser | Select-Object DisplayName, UserPrincipalName, Mail |
-    Format-Table -AutoSize
+if ($endDate -lt $startDate) {
+    Write-Host "End date cannot be before start date." -ForegroundColor Red
     return
 }
 
 
 ####################################################################################
-#################### FIND GROUPS CONTAINING TARGET USER ############################
+#################### BUILD ODATA FILTER ############################################
+####################################################################################
+$startDateOData = $startDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+# Convoluted because Microsoft Graph accepts "le" and not "lt" for date comparisons
+$endDateOData = $endDate.Date.AddDays(1).AddTicks(-1).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
+
+$filter = "createdDateTime ge $startDateOData and createdDateTime le $endDateOData"
+
+
+####################################################################################
+#################### FIND TARGET ACCOUNTS ##########################################
 ####################################################################################
 try {
-    # "-All" avoids pagination when query return multiple pages
-    $tuAllGroups = Get-MgUserMemberOf `
-        -UserId $targetUser.Id `
-        -All `
-        -ErrorAction Stop
+    $users = @(
+        Get-MgUser `
+            -Filter $filter `
+            -Property DisplayName, UserPrincipalName, JobTitle, CreatedDateTime `
+            -All `
+            -ErrorAction Stop
+    )
 }
 catch {
-    # Throws on MicrosoftGraph error.  NOT triggered if no match found
-    Write-Warning "Microsoft Graph error: $($_.Exception.Message)"
+    Write-Host "Microsoft Graph error: $($_.Exception.Message)" -ForegroundColor Red
     return
 }
 
-####################################################################################
-################ FIND DETAILS FOR GROUPS CONTAINING TARGET USER ####################
-####################################################################################
-$tuagDetails = $tuAllGroups | ForEach-Object { 
-    $groupDetails = Get-MgGroup `
-        -GroupId $_.Id `
-        -Property DisplayName, GroupTypes, MailEnabled, SecurityEnabled, Mail `
-        -ErrorAction SilentlyContinue
-
-    if ($groupDetails) {
-        $groupResult = [PSCustomObject]@{
-            "Group Name"  = $groupDetails.DisplayName
-            "Group Email" = $groupDetails.Mail
-        }
-
-        $groupType = if ($groupDetails.GroupTypes -contains "Unified") {
-            "Microsoft 365"
-        }
-        elseif ($groupDetails.MailEnabled -and $groupDetails.SecurityEnabled) {
-            "Mail-enabled Security"
-        }
-        elseif ($groupDetails.MailEnabled) {
-            "Distribution"
-        }
-        elseif ($groupDetails.SecurityEnabled) {
-            "Security"
-        }
-        else {
-            "Unknown"
-        }
-
-        $groupResult | Add-Member -NotePropertyName "Group Type" -NotePropertyValue $groupType
-        $groupResult
-    }
-}
 
 ####################################################################################
-################# BUILD USER DETAILS OUTPUT OBJECT #################################
+#################### BUILD RESULTS OBJECT ##########################################
 ####################################################################################
-$tuDetails = [PSCustomObject]@{
-    Name            = $targetUser.DisplayName
-    UPN             = $targetUser.UserPrincipalName
-    JobTitle        = $targetUser.JobTitle
-    CreatedDateTime = $targetUser.CreatedDateTime
-
-    Aliases         = @(
-        $targetUser.ProxyAddresses |
-        Where-Object { $_ -cmatch "^smtp:" } |
-        ForEach-Object { $_ -replace "^smtp:", "" } |
-        Sort-Object
-    )
-    
-    AllGroups       = @(
-        {
-            $group = Get-MgGroup `
-                -GroupId $member.Id `
-                -Property DisplayName, GroupTypes, MailEnabled, SecurityEnabled, Mail `
-                -ErrorAction SilentlyContinue
-
-            if (-not $group) {continue}
-
-            [PSCustomObject]@{
-                Name      = $group.DisplayName
-                Email     = $group.Mail
-
-                GroupType = if ($group.GroupTypes -contains "Unified") {
-                    "Microsoft 365"
-                }
-                elseif ($group.MailEnabled -and $group.SecurityEnabled) {
-                    "Mail-enabled Security"
-                }
-                elseif ($group.MailEnabled) {
-                    "Distribution"
-                }
-                elseif ($group.SecurityEnabled) {
-                    "Security"
-                }
-                else {
-                    "Unknown"
-                }
-            }
-        }
-    )
-}
-
-
-
-
-
-
-
+$results = @(
+    $users |
+    Sort-Object CreatedDateTime
+)
 
 
 ####################################################################################
 #################### CONSOLE OUTPUT ################################################
 ####################################################################################
-Write-Host ("{0,-20}" -f "Name:") -ForegroundColor Green -NoNewline
-Write-Host $targetUser.DisplayName
-Write-Host ("{0,-20}" -f "UPN:") -ForegroundColor Green -NoNewline
-Write-Host $targetUser.UserPrincipalName
-Write-Host ("{0,-20}" -f "Job Title:") -ForegroundColor Green -NoNewline
-Write-Host $targetUser.JobTitle
-Write-Host ("{0,-20}" -f "Creation Date/Time:") -ForegroundColor Green -NoNewline
-Write-Host $targetUser.CreatedDateTime
+Write-Host "`nUser accounts created between " -ForegroundColor Blue -NoNewline
+Write-Host $startDate.ToString("MM-dd-yyyy") -ForegroundColor Green -NoNewline
+Write-Host " and " -ForegroundColor Blue -NoNewline
+Write-Host $endDate.ToString("MM-dd-yyyy") -ForegroundColor Green
 
-Write-Host "`nEmail Aliases:" -ForegroundColor Cyan
-if ($targetAliases) {
-    $targetAliases |
-    Sort-Object |
-    ForEach-Object { Write-Host $_ }
+Write-Host "`nTotal users found: $($results.Count)" -ForegroundColor Yellow
+
+if ($results.Count -gt 0) {
+    Write-Host ""
+
+    # NOT three arrays
+    # '@'{} === three hashtables that expose width column
+    $results |
+    Format-Table `
+        @{Label="DisplayName"; Expression={$_.DisplayName}; Width=30},
+        @{Label="UserPrincipalName"; Expression={$_.UserPrincipalName}; Width=60},
+        @{Label="CreatedDateTime"; Expression={$_.CreatedDateTime}; Width=23} |
+    Out-Host
 }
 else {
-    Write-Host "No email aliases found." -ForegroundColor Yellow
-}
-
-Write-Host "`nGroup Memberships:" -ForegroundColor Cyan
-
-if ($tuagDetails) {
-    $tuagDetails |
-    Sort-Object "Group Name" |
-    Format-Table "Group Name", "Group Type", "Group Email" -AutoSize
-}
-else {
-    Write-Host "No group memberships found." -ForegroundColor Yellow
-}
-
-Write-Host "`nTotal execution time: $($stopwatch.Elapsed)" -ForegroundColor Cyan
-Write-Host "`nCSV file created:" -ForegroundColor Green
-Write-Host $csvPath
-
-
-# =========================================================
-# CREATE CSV REPORT
-# =========================================================
-$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-$userName = $targetUser.UserPrincipalName.Split("@")[0]
-$csvPath = ".\UserDetails_${userName}_$timestamp.csv"
-
-# User information
-"Name,$($targetUser.DisplayName)" | Out-File -FilePath $csvPath -Encoding utf8
-"UPN,$($targetUser.UserPrincipalName)" | Out-File -FilePath $csvPath -Append -Encoding utf8
-"Job Title,$($targetUser.JobTitle)" | Out-File -FilePath $csvPath -Append -Encoding utf8
-"Creation Date/Time,$($targetUser.CreatedDateTime)" | Out-File -FilePath $csvPath -Append -Encoding utf8
-"" | Out-File -FilePath $csvPath -Append -Encoding utf8
-"Email Aliases" | Out-File -FilePath $csvPath -Append -Encoding utf8
-
-if ($targetAliases) {
-    foreach ($alias in ($targetAliases | Sort-Object)) {
-        $alias | Out-File -FilePath $csvPath -Append -Encoding utf8
-    }
-}
-else {
-    "No email aliases found." |
-    Out-File -FilePath $csvPath -Append -Encoding utf8
+    Write-Host "`nNo user accounts were created within the specified date range." -ForegroundColor Yellow
 }
 
 
-"" | Out-File -FilePath $csvPath -Append -Encoding utf8
+####################################################################################
+#################### CREATE CSV ####################################################
+####################################################################################
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
+$csvPath = ".\EntraUsersByCreatedDate_$($startDate.ToString('yyyy-MM-dd'))_to_$($endDate.ToString('yyyy-MM-dd'))_$timestamp.csv"
 
-# Group table header
-"Group Name,Group Type,Group Email" | Out-File -FilePath $csvPath -Append -Encoding utf8
-
-
-# Group data
-if ($tuagDetails) {
-    foreach ($groupResult in ($tuagDetails | Sort-Object "Group Name")) {
-        "$($groupResult.'Group Name'),$($groupResult.'Group Type'),$($groupResult.'Group Email')" |
-        Out-File -FilePath $csvPath -Append -Encoding utf8
-    }
+try {
+    $results |
+    Export-Csv `
+        -Path $csvPath `
+        -NoTypeInformation `
+        -Encoding utf8 `
+        -ErrorAction Stop
+}
+catch {
+    Write-Host "Unable to create CSV file: $($_.Exception.Message)" -ForegroundColor Red
+    return
 }
 
 
+####################################################################################
+#################### EXECUTION TIME ################################################
+####################################################################################
+$stopwatch.Stop()
 
+Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
+Write-Host "Get_EntraUsersByCreatedDate.ps1" -ForegroundColor Cyan
 
+Write-Host ("{0,-25}" -f "CSV file generated:") -ForegroundColor DarkYellow -NoNewline
+Write-Host (Resolve-Path $csvPath) -ForegroundColor DarkYellow
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ####################################################################################
-# #################### Find User's Email Aliases #####################################
-# ####################################################################################
-# # SMTP = primary; smtp = alias
-# $targetAliases = $targetUser.ProxyAddresses |
-# Where-Object { $_ -cmatch "^smtp:" } |
-# ForEach-Object { $_ -replace "^smtp:", "" }
+Write-Host ("{0,-25}" -f "Total Execution Time:") -ForegroundColor DarkGreen -NoNewline
+Write-Host $stopwatch.Elapsed -ForegroundColor DarkGreen

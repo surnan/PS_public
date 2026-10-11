@@ -169,7 +169,6 @@ $csvPath = ".\GroupDetails_${groupName_2_fileName}_$timestamp.csv"
 
 try {
     @(
-        "File Name, $($csvPath)"
         "Group Name,$($tgDetails.Name)"
         "Group Email,$($tgDetails.Email)"
         "Group Type,$($tgDetails.GroupType)"
@@ -190,7 +189,6 @@ try {
     if ($tgDetails.Members.Count -gt 0) {
         $tgDetails.Members |
         Sort-Object Name |
-        ConvertTo-Csv -NoTypeInformation |
         Add-Content -Path $csvPath -Encoding utf8
     }
     else {
