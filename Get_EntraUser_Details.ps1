@@ -1,42 +1,81 @@
 # Get_EntraUser_Details.ps1
-# Input = User email address (primary email or alias or username)
+# Input: User email address (primary email, alias, or UPN)
 #
-# Output: 
+# Output:
 #   Display Name
 #   Username
 #   Primary Email Address
 #   Job Title
 #   Creation Date/Time
 #   All Email Aliases
-#   Group Memberships (Name, Type, Primary Email)
+#   Group Memberships:
+#       Group Name
+#       Group Type
+#       Group Email
+#       Membership (Direct/Nested)
+#       Member Through (nested group path)
 #
 # Export:
 #   CSV: Same Output
 
 
 ####################################################################################
-#################### All Microsoft Graph Powershell Scripts START ##################
+#################### MICROSOFT GRAPH CONNECTION ####################################
 ####################################################################################
-if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
-    Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -ErrorAction Stop
+$modules = @(
+    "Microsoft.Graph.Users"
+    "Microsoft.Graph.Groups"
+)
+
+$requiredScopes = @("User.Read.All", "Group.Read.All")
+
+try {
+    foreach ($module in $modules) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            Install-Module $module -Scope CurrentUser -ErrorAction Stop
+        }
+        Import-Module $module -ErrorAction Stop
+    }
+
+    $connection = Get-MgContext
+
+    if (-not $connection) {
+        Connect-MgGraph `
+            -Scopes $requiredScopes `
+            -ContextScope CurrentUser `
+            -NoWelcome `
+            -ErrorAction Stop
+        $connection = Get-MgContext
+    }
+
+    if ($connection.AuthType -ne "Delegated") {
+        throw "A delegated Microsoft Graph connection is required."
+    }
+
+    $missingScopes = @(
+        $requiredScopes | Where-Object {
+            $_ -notin @($connection.Scopes)
+        }
+    )
+
+    if ($missingScopes.Count -gt 0) {
+        throw "Missing Graph scopes: $($missingScopes -join ', ')"
+    }
 }
-Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-
-$connection = Get-MgContext
-if (-not $connection) {
-    Connect-MgGraph `
-        -Scopes "User.Read.All", "Group.Read.All"`
-        -NoWelcome `
-        -ErrorAction Stop
+catch {
+    Write-Host "Microsoft Graph connection failed (1):" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
 }
 
 
 ####################################################################################
-#################### Get Input Parameters ##########################################
+#################### GET INPUT PARAMETERS ##########################################
 ####################################################################################
-$inputEmail = Read-Host "Enter user's email address"
+$inputEmail = (Read-Host "Enter user's email address").Trim()
+
 if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host "Invalid email format (1)" -ForegroundColor Red
+    Write-Host "Invalid email format (1A)" -ForegroundColor Red
     return
 }
 
@@ -47,113 +86,210 @@ if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
-    # Search both UPN & Mail properties
-    # ConvergeDirect vs ConvergeMarketing
-    $targetUser = Get-MgUser `
-        -Filter "userPrincipalName eq '$inputEmail' or mail eq '$inputEmail'" `
-        -Property Id, DisplayName, UserPrincipalName, Mail, JobTitle, CreatedDateTime, ProxyAddresses `
-        -ErrorAction Stop
+    $targetUser = @(
+        Get-MgUser `
+            -Filter "userPrincipalName eq '$inputEmail' or mail eq '$inputEmail'" `
+            -Property Id, DisplayName, UserPrincipalName, Mail, JobTitle, CreatedDateTime, ProxyAddresses `
+            -ErrorAction Stop
+    )
 }
 catch {
-    # Throws on MicrosoftGraph error.  NOT triggered if no match found
     Write-Warning "Microsoft Graph error (2): $($_.Exception.Message)"
     return
 }
 
-# Check Alias emails if targetUser not found
-if (-not $targetUser) {
-    Write-Host "Not found as primary email or UPN. Checking aliases..." -ForegroundColor Yellow
+if ($targetUser.Count -eq 0) {
     try {
-        # SMTP = primary; smtp = alias
-        $targetUser = Get-MgUser `
-            -Filter "proxyAddresses/any(address:address eq 'smtp:$inputEmail')" `
-            -Property Id, DisplayName, UserPrincipalName, Mail, JobTitle, CreatedDateTime, ProxyAddresses `
-            -ErrorAction Stop
+        $targetUser = @(
+            Get-MgUser `
+                -Filter "proxyAddresses/any(address:address eq 'smtp:$inputEmail')" `
+                -Property Id, DisplayName, UserPrincipalName, Mail, JobTitle, CreatedDateTime, ProxyAddresses `
+                -ErrorAction Stop
+        )
     }
     catch {
-        # Throws on MicrosoftGraph error.  NOT triggered if no match found
         Write-Warning "Microsoft Graph error (3): $($_.Exception.Message)"
         return
     }
 }
 
-if (-not $targetUser) {
+if ($targetUser.Count -eq 0) {
     Write-Host "No user found with email address (4): $inputEmail" -ForegroundColor Red
     return
 }
 
-# Only users have UPN/username & email properties
-if (@($targetUser).Count -gt 1) {
+if ($targetUser.Count -gt 1) {
     Write-Warning "Multiple users matched this email address (5)"
-    $targetUser | Select-Object DisplayName, UserPrincipalName, Mail |
-    Format-Table -AutoSize
+    $targetUser |
+    Select-Object DisplayName, UserPrincipalName, Mail |
+    Format-Table -AutoSize |
+    Out-Host
     return
 }
+# convert array into regular variable
+$targetUser = $targetUser[0]
 
 
 ####################################################################################
-#################### FIND GROUPS CONTAINING TARGET USER ############################
+#################### FIND DIRECT AND NESTED GROUP MEMBERSHIPS ######################
 ####################################################################################
 try {
-    # "-All" avoids pagination when query return multiple pages
-    $tuAllGroups = Get-MgUserMemberOf `
-        -UserId $targetUser.Id `
-        -All `
-        -ErrorAction Stop
+    $directGroups = @(
+        Get-MgUserMemberOfAsGroup `
+            -UserId $targetUser.Id `
+            -Property Id `
+            -All `
+            -ErrorAction Stop
+    )
 }
 catch {
-    # Throws on MicrosoftGraph error.  NOT triggered if no match found
-    Write-Warning "Microsoft Graph error (6): $($_.Exception.Message)"
+    Write-Warning "Unable to retrieve direct group memberships (6): $($_.Exception.Message)"
     return
 }
 
+
+# Retrieve direct and nested group memberships
+try {
+    $allGroups = @(
+        Get-MgUserTransitiveMemberOfAsGroup `
+            -UserId $targetUser.Id `
+            -Property Id, DisplayName, Mail, GroupTypes, MailEnabled, SecurityEnabled `
+            -All `
+            -ErrorAction Stop
+    )
+}
+catch {
+    Write-Warning "Unable to retrieve transitive group memberships (6A): $($_.Exception.Message)"
+    return
+}
+
+
 ####################################################################################
-################# BUILD USER DETAILS OUTPUT OBJECT #################################
+#################### RESOLVE NESTED GROUP PATHS ####################################
+####################################################################################
+$directGroupIds = @($directGroups | ForEach-Object { $_.Id })
+
+# Array of all the User's group's ID
+$groupById = @{}
+foreach ($group in $allGroups) {
+    $groupById[$group.Id] = $group
+}
+
+$groupPaths = @{}
+$parentCache = @{}
+$queue = [System.Collections.Generic.Queue[object]]::new()
+
+# create queue with with each group ID and grow with each connected group
+foreach ($group in $directGroups) {
+    $queue.Enqueue(@($group.Id))
+}
+
+try {
+    while ($queue.Count -gt 0) {
+        $path = @($queue.Dequeue())
+        $currentId = $path[-1]
+        if (-not $parentCache.ContainsKey($currentId)) {
+            $parentCache[$currentId] = @(
+                Get-MgGroupMemberOfAsGroup `
+                    -GroupId $currentId `
+                    -Property Id `
+                    -All `
+                    -ErrorAction Stop
+            )
+        }
+
+        foreach ($parent in $parentCache[$currentId]) {
+            $parentId = $parent.Id
+            if ($parentId -in $path -or -not $groupById.ContainsKey($parentId)) {
+                continue
+            }
+
+            $newPath = @($path) + @($parentId)
+            $through = @(
+                $path | ForEach-Object {
+                    if ($groupById.ContainsKey($_)) {
+                        $groupById[$_].DisplayName
+                    }
+                }
+            ) -join " -> "
+
+            if (-not $groupPaths.ContainsKey($parentId)) {
+                $groupPaths[$parentId] = @()
+            }
+
+            if ($through -notin $groupPaths[$parentId]) {
+                $groupPaths[$parentId] += $through
+            }
+            $queue.Enqueue($newPath)
+        }
+    }
+}
+catch {
+    Write-Host "Unable to resolve nested group paths (7): $($_.Exception.Message)" -ForegroundColor Red
+    return
+}
+
+
+####################################################################################
+#################### BUILD USER DETAILS OUTPUT OBJECT ##############################
 ####################################################################################
 $tuDetails = [PSCustomObject]@{
     Name            = $targetUser.DisplayName
     UPN             = $targetUser.UserPrincipalName
+    Email           = $targetUser.Mail
     JobTitle        = $targetUser.JobTitle
     CreatedDateTime = $targetUser.CreatedDateTime
 
     Aliases         = @(
         $targetUser.ProxyAddresses |
-        Where-Object { $_ -cmatch "^smtp:" } |
-        ForEach-Object { $_ -replace "^smtp:", "" } |
+        Where-Object { $_ -cmatch '^smtp:' } |
+        ForEach-Object { $_ -creplace '^smtp:', '' } |
         Sort-Object
     )
-    
+
     AllGroups       = @(
-        $tuAllGroups | ForEach-Object { 
-            $groupDetails = Get-MgGroup `
-                -GroupId $_.Id `
-                -Property DisplayName, GroupTypes, MailEnabled, SecurityEnabled, Mail `
-                -ErrorAction SilentlyContinue
+        $allGroups | ForEach-Object {
+            $group = $_
 
-            if ($groupDetails) {
-                $groupResult = [PSCustomObject]@{
-                    "Group Name"  = $groupDetails.DisplayName
-                    "Group Email" = $groupDetails.Mail
-                }
+            $groupType = if ($group.GroupTypes -contains "Unified") {
+                "Microsoft 365"
+            }
+            elseif ($group.MailEnabled -and $group.SecurityEnabled) {
+                "Mail-enabled Security"
+            }
+            elseif ($group.MailEnabled) {
+                "Distribution"
+            }
+            elseif ($group.SecurityEnabled) {
+                "Security"
+            }
+            else {
+                "Unknown"
+            }
 
-                $groupType = if ($groupDetails.GroupTypes -contains "Unified") {
-                    "Microsoft 365"
-                }
-                elseif ($groupDetails.MailEnabled -and $groupDetails.SecurityEnabled) {
-                    "Mail-enabled Security"
-                }
-                elseif ($groupDetails.MailEnabled) {
-                    "Distribution"
-                }
-                elseif ($groupDetails.SecurityEnabled) {
-                    "Security"
-                }
-                else {
-                    "Unknown"
-                }
+            $membership = if ($group.Id -in $directGroupIds) {
+                "Direct"
+            }
+            else {
+                "Nested"
+            }
 
-                $groupResult | Add-Member -NotePropertyName "Group Type" -NotePropertyValue $groupType
-                $groupResult
+            $memberThrough = if ($membership -eq "Direct") {
+                ""
+            }
+            elseif ($groupPaths.ContainsKey($group.Id)) {
+                $groupPaths[$group.Id] -join " | "
+            }
+            else {
+                "Path not resolved"
+            }
+
+            [PSCustomObject]@{
+                "Group Name"     = $group.DisplayName
+                "Group Type"     = $groupType
+                "Group Email"    = $group.Mail
+                "Membership"     = $membership
+                "Member Through" = $memberThrough
             }
         }
     )
@@ -163,19 +299,25 @@ $tuDetails = [PSCustomObject]@{
 ####################################################################################
 #################### CONSOLE OUTPUT ################################################
 ####################################################################################
-Write-Host ("{0,-20}" -f "Name:") -ForegroundColor Green -NoNewline
+Write-Host ("`n{0,-20}" -f "Name:") -ForegroundColor Green -NoNewline
 Write-Host $tuDetails.Name
+
 Write-Host ("{0,-20}" -f "UPN:") -ForegroundColor Green -NoNewline
 Write-Host $tuDetails.UPN
+
+Write-Host ("{0,-20}" -f "Primary Email:") -ForegroundColor Green -NoNewline
+Write-Host $tuDetails.Email
+
 Write-Host ("{0,-20}" -f "Job Title:") -ForegroundColor Green -NoNewline
 Write-Host $tuDetails.JobTitle
+
 Write-Host ("{0,-20}" -f "Creation Date/Time:") -ForegroundColor Green -NoNewline
 Write-Host $tuDetails.CreatedDateTime
 
 Write-Host "`nEmail Aliases:" -ForegroundColor Cyan
+
 if ($tuDetails.Aliases.Count -gt 0) {
-    $tuDetails.Aliases |
-    Out-Host
+    $tuDetails.Aliases | Out-Host
 }
 else {
     Write-Host "No email aliases found." -ForegroundColor Yellow
@@ -185,27 +327,43 @@ Write-Host "`n{Group Memberships}" -ForegroundColor Cyan
 
 if ($tuDetails.AllGroups.Count -gt 0) {
     $tuDetails.AllGroups |
-    Sort-Object "Group Name" |
-    Format-Table "Group Name", "Group Type", "Group Email" -AutoSize
+    Sort-Object Membership, "Group Name" |
+    Format-Table `
+    @{Label = "Group Name"; Expression = { $_.'Group Name' }; Width = 32 },
+    @{Label = "Group Type"; Expression = { $_.'Group Type' }; Width = 24 },
+    @{Label = "Membership"; Expression = { $_.Membership }; Width = 10 },
+    @{Label = "Member Through"; Expression = { $_.'Member Through' }; Width = 55 } `
+        -Wrap:$false |
+    Out-Host
 }
 else {
     Write-Host "No group memberships found." -ForegroundColor Yellow
 }
 
+$nestedCount = @(
+    $tuDetails.AllGroups | Where-Object Membership -eq "Nested"
+).Count
+
+Write-Host "`nTotal groups: $($tuDetails.AllGroups.Count)" -ForegroundColor Yellow
+Write-Host "Direct groups: $($directGroups.Count)" -ForegroundColor Yellow
+Write-Host "Nested-only groups: $nestedCount" -ForegroundColor Yellow
+
 
 ####################################################################################
 #################### CREATE CSV ####################################################
 ####################################################################################
-$stopwatch.Stop()
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 
 $filename = $targetUser.UserPrincipalName.Split("@")[0]
+$filename = $filename -replace '[^\w\.-]', '_'
+
 $csvPath = ".\UserDetails_${filename}_$timestamp.csv"
 
 try {
     @(
         "Name,$($tuDetails.Name)"
         "UPN,$($tuDetails.UPN)"
+        "Primary Email,$($tuDetails.Email)"
         "Job Title,$($tuDetails.JobTitle)"
         "Creation Date/Time,$($tuDetails.CreatedDateTime)"
         ""
@@ -222,37 +380,35 @@ try {
     }
 
     "" | Add-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
+    "Group Memberships" | Add-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
 
-    # Export group membership table
     if ($tuDetails.AllGroups.Count -gt 0) {
         $tuDetails.AllGroups |
         Sort-Object "Group Name" |
-        Select-Object "Group Name", "Group Type", "Group Email" |
         ConvertTo-Csv -NoTypeInformation |
         Add-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
     }
     else {
-        "Group Name,Group Type,Group Email" |
+        "Group Name,Group Type,Group Email,Membership,Member Through" |
         Add-Content -Path $csvPath -Encoding utf8 -ErrorAction Stop
     }
 }
 catch {
-    Write-Host "Unable to create CSV file (7): $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Unable to create CSV file (8): $($_.Exception.Message)" -ForegroundColor Red
     return
 }
-
-
-
 
 
 ####################################################################################
 #################### EXECUTION TIME ################################################
 ####################################################################################
+$stopwatch.Stop()
+
 Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
-Write-Host "Get_EntraGroup_Members.ps1" -ForegroundColor Cyan
+Write-Host "Get_EntraUser_Details.ps1" -ForegroundColor Cyan
 
 Write-Host ("{0,-25}" -f "CSV file generated:") -ForegroundColor DarkYellow -NoNewline
 Write-Host (Resolve-Path $csvPath) -ForegroundColor DarkYellow
 
 Write-Host ("{0,-25}" -f "Total Execution Time:") -ForegroundColor DarkGreen -NoNewline
-Write-Host "($stopwatch.Elapsed)" -ForegroundColor DarkGreen
+Write-Host "($($stopwatch.Elapsed))" -ForegroundColor DarkGreen

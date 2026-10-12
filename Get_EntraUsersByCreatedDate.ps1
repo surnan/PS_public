@@ -12,19 +12,53 @@
 
 
 ####################################################################################
-#################### All Microsoft Graph Powershell Scripts START ##################
+#################### MICROSOFT GRAPH CONNECTION ####################################
 ####################################################################################
-if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
-    Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -ErrorAction Stop
-}
-Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+$modules = @(
+    "Microsoft.Graph.Users"
+)
 
-$connection = Get-MgContext
-if (-not $connection) {
-    Connect-MgGraph `
-        -Scopes "User.Read.All"`
-        -NoWelcome `
-        -ErrorAction Stop
+$requiredScopes = @("User.Read.All")
+
+try {
+    foreach ($module in $modules) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            Install-Module $module -Scope CurrentUser -ErrorAction Stop
+        }
+
+        Import-Module $module -ErrorAction Stop
+    }
+
+    $connection = Get-MgContext
+
+    if (-not $connection) {
+        Connect-MgGraph `
+            -Scopes $requiredScopes `
+            -ContextScope CurrentUser `
+            -NoWelcome `
+            -ErrorAction Stop
+
+        $connection = Get-MgContext
+    }
+
+    if ($connection.AuthType -ne "Delegated") {
+        throw "A delegated Microsoft Graph connection is required."
+    }
+
+    $missingScopes = @(
+        $requiredScopes | Where-Object {
+            $_ -notin @($connection.Scopes)
+        }
+    )
+
+    if ($missingScopes.Count -gt 0) {
+        throw "Missing Graph scopes: $($missingScopes -join ', ')"
+    }
+}
+catch {
+    Write-Host "Microsoft Graph connection failed:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
 }
 
 
@@ -73,7 +107,7 @@ if ($endDate -lt $startDate) {
 ####################################################################################
 $startDateOData = $startDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
-# Convoluted because Microsoft Graph accepts "le" and not "lt" for date comparisons
+# Microsoft Graph accepts "le" rather than "lt" for this date filter
 $endDateOData = $endDate.Date.AddDays(1).AddTicks(-1).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
 
 $filter = "createdDateTime ge $startDateOData and createdDateTime le $endDateOData"
@@ -102,8 +136,8 @@ catch {
 ####################################################################################
 $results = [PSCustomObject]@{
     startDate = $startDate
-    endDate = $endDate
-    allUsers = @($users | Sort-Object CreatedDateTime )
+    endDate   = $endDate
+    allUsers  = @($users | Sort-Object CreatedDateTime)
 }
 
 
@@ -114,6 +148,7 @@ Write-Host "`nUser accounts created between " -ForegroundColor Blue -NoNewline
 Write-Host $results.startDate -ForegroundColor Green -NoNewline
 Write-Host " and " -ForegroundColor Blue -NoNewline
 Write-Host $results.endDate -ForegroundColor Green
+
 Write-Host "`nTotal users found: $($results.allUsers.Count)" -ForegroundColor Yellow
 Write-Host ""
 

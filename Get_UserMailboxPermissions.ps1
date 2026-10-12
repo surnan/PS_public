@@ -1,67 +1,93 @@
 
 # Get_UserMailboxPermissions.ps1
 # Reports direct and security-group-based Full Access permissions.
-# Uses 5 parallel session 
-# Mailbox retry max = 2 to help prevent access errors caused by multiple processes on same mailbox
+# Uses 5 parallel sessions
+# Mailbox retry max = 2 to help prevent access errors caused by
+# multiple processes querying the same mailbox
+
 
 ####################################################################################
-#################### All Exchange Powershell Scripts START #########################
+#################### EXCHANGE ONLINE CONNECTION ####################################
 ####################################################################################
-# Check Exchange Online module
-if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-    Install-Module ExchangeOnlineManagement `
-        -Scope CurrentUser `
-        -ErrorAction Stop
-}
-
-# Module installed from if statement above
-Import-Module ExchangeOnlineManagement -ErrorAction Stop
-
-# Get-ConnectionInformation belongs to ExchangeOnlineManagement module
-$connection = Get-ConnectionInformation -ErrorAction SilentlyContinue |
-    Where-Object { $_.State -eq "Connected" }
-
-if (-not $connection) {
-    Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-}
-####################################################################################
-#################### All Exchange Powershell Scripts END ###########################
-####################################################################################
-
-
-
-## Convert input --> $user
-$user_email = Read-Host "Enter the user's email address"
-if ($user_email.Trim() -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host "Invalid email format." -ForegroundColor Red -BackgroundColor White
-    exit
-}
+$modules = @(
+    "ExchangeOnlineManagement"
+)
 
 try {
-    $user = Get-EXORecipient -Identity $user_email -ErrorAction Stop
+    foreach ($module in $modules) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            Install-Module $module -Scope CurrentUser -ErrorAction Stop
+        }
+
+        Import-Module $module -ErrorAction Stop
+    }
+
+    $connection = Get-ConnectionInformation -ErrorAction Stop |
+        Where-Object { $_.State -eq "Connected" }
+
+    if (-not $connection) {
+        Connect-ExchangeOnline `
+            -ShowBanner:$false `
+            -ErrorAction Stop
+    }
 }
 catch {
-    Write-Warning "Could not find user: $user_email"
+    Write-Host "Exchange Online connection failed (1)" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
+}
+
+
+####################################################################################
+#################### GET INPUT PARAMETERS ##########################################
+####################################################################################
+$user_email = (Read-Host "Enter the user's email address").Trim()
+
+if ($user_email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+    Write-Host "Invalid email format (2)" -ForegroundColor Red -BackgroundColor White
+    return
+}
+
+
+####################################################################################
+#################### FIND TARGET USER ##############################################
+####################################################################################
+try {
+    $user = Get-EXORecipient `
+        -Identity $user_email `
+        -ErrorAction Stop
+}
+catch {
+    Write-Warning "Could not find user (3): $user_email"
     return
 }
 
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-# User properties push into each parallel session
-# String Array of all user identifiers for future query inputs
-# Unique prevents array from growing without new identifiers
+
+####################################################################################
+#################### BUILD USER IDENTIFIERS ########################################
+####################################################################################
+# User properties pushed into each parallel session
+# Unique prevents duplicate identifiers
+
 $userIdentifiers = @(
-    [string]$user.PrimarySmtpAddress    #otherwise, data-type: SmtpAddress
-    [string]$user.Guid                  #otherwise, data-type: Guid
+    [string]$user.PrimarySmtpAddress
+    [string]$user.Guid
     [string]$user.DistinguishedName
     [string]$user.Name
     [string]$user.DisplayName
     [string]$user_email
 ) | Where-Object { $_ } | Select-Object -Unique
 
-# Get-DistributionGroup = Only Distribution & mail-enabled security groups
-# 'Get-MgGroup' = Entra ID + Microsoft 365 + mail-enabled groups
+
+####################################################################################
+#################### FIND SECURITY GROUP MEMBERSHIPS ###############################
+####################################################################################
+# Get-DistributionGroup returns distribution and mail-enabled security groups
+
 Write-Host "`nChecking security group memberships..." -ForegroundColor Yellow
+
 try {
     $allSecurityGroups = @(
         Get-DistributionGroup `
@@ -71,12 +97,12 @@ try {
     )
 }
 catch {
-    Write-Warning "Could not retrieve security groups: $($_.Exception.Message)"
+    Write-Warning "Could not retrieve security groups (4): $($_.Exception.Message)"
     return
 }
 
-$userGroups = @()   # Groups containing the user
-$groupErrors = @()  # Array of Group iteration errors
+$userGroups = @()
+$groupErrors = @()
 
 foreach ($currentGroup in $allSecurityGroups) {
     try {
@@ -86,12 +112,15 @@ foreach ($currentGroup in $allSecurityGroups) {
                 -ResultSize Unlimited `
                 -ErrorAction Stop
         )
+
         $isMember = $members | Where-Object {
             $_.Guid -eq $user.Guid -or
             $_.PrimarySmtpAddress -eq $user.PrimarySmtpAddress
         }
+
         if ($isMember) {
             $userGroups += $currentGroup
+
             Write-Host "Security group: $($currentGroup.DisplayName)" `
                 -ForegroundColor Green
         }
@@ -107,8 +136,13 @@ foreach ($currentGroup in $allSecurityGroups) {
 Write-Host "`nSecurity groups found: $($userGroups.Count)" `
     -ForegroundColor Magenta
 
+
+####################################################################################
+#################### BUILD SECURITY GROUP LOOKUP ###################################
+####################################################################################
 # Build lookup table for user's security groups
 # Pushed into each parallel session
+
 $groupLookup = @{}
 
 foreach ($currentGroup in $userGroups) {
@@ -128,7 +162,12 @@ foreach ($currentGroup in $userGroups) {
     }
 }
 
+
+####################################################################################
+#################### RETRIEVE ALL MAILBOXES ########################################
+####################################################################################
 # Retrieve all mailboxes except user's own
+
 $allMailboxes = @(
     Get-EXOMailbox -ResultSize Unlimited -ErrorAction Stop |
         Where-Object {
@@ -138,12 +177,14 @@ $allMailboxes = @(
 
 Write-Host "`nMailbox count = $($allMailboxes.Count)" -ForegroundColor Magenta
 
-# Display temporary progress indicator
 Write-Progress `
     -Activity "Checking mailbox permissions" `
     -Status "Scanning $($allMailboxes.Count) mailboxes using 5 parallel workers..."
 
-# Scan mailbox permissions in parallel
+
+####################################################################################
+#################### SCAN MAILBOX PERMISSIONS ######################################
+####################################################################################
 try {
     $results = @(
         $allMailboxes | ForEach-Object -Parallel {
@@ -154,8 +195,8 @@ try {
             $groups = $using:groupLookup
 
             # Two attempts = initial query + one retry
-            # Retry mailbox queries from multi-thread conflict
             $maxAttempts = 2
+
             for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
                 try {
                     # Retrieve mailbox permission entries
@@ -164,6 +205,7 @@ try {
                             -Identity $currentMailbox.PrimarySmtpAddress `
                             -ErrorAction Stop
                     )
+
                     foreach ($permission in $permissions) {
                         # Only check explicitly allowed Full Access
                         if ($permission.AccessRights -notcontains "FullAccess" -or
@@ -173,6 +215,7 @@ try {
                         }
 
                         $permissionUser = [string]$permission.User
+
                         # User has Direct Full Access
                         if ($userIds -contains $permissionUser) {
                             [PSCustomObject]@{
@@ -194,13 +237,13 @@ try {
                             }
                         }
                     }
+
                     # Query succeeded; exit retry loop
-                    break                       
+                    break
                 }
                 catch {
                     if ($attempt -lt $maxAttempts) {
                         # Wait two seconds before retrying
-                        # Hoping delay reduces chance this mailbox having another multi-thread conflict
                         Start-Sleep -Seconds 2
                     }
                     else {
@@ -219,19 +262,23 @@ try {
     )
 }
 finally {
-    # Remove progress indicator
     Write-Progress -Activity "Checking mailbox permissions" -Completed
 }
 
 
-# Get successful Full Access matches
+####################################################################################
+#################### FILTER FULL ACCESS RESULTS ####################################
+####################################################################################
 $fullAccess = @(
     $results |
         Where-Object { $_.Status -eq "FullAccess" } |
         Sort-Object Mailbox, Access
 )
 
-# Display Full Access results
+
+####################################################################################
+#################### CONSOLE OUTPUT ################################################
+####################################################################################
 Write-Host "`nMailbox Full Access permissions:" -ForegroundColor Cyan
 
 if ($fullAccess.Count -gt 0) {
@@ -243,7 +290,10 @@ else {
     Write-Host "No Full Access permissions found." -ForegroundColor Yellow
 }
 
-# Print out Errors
+
+####################################################################################
+#################### DISPLAY ERRORS ################################################
+####################################################################################
 $errorsFound = @($results | Where-Object { $_.Status -eq "Error" })
 
 foreach ($result in $errorsFound) {
@@ -254,13 +304,15 @@ foreach ($groupError in $groupErrors) {
     Write-Warning "Could not check group $($groupError.Group): $($groupError.Error)"
 }
 
-$stopwatch.Stop()   # Stop timer
 
-# Calculate summary totals
+####################################################################################
+#################### EXECUTION TIME ################################################
+####################################################################################
+$stopwatch.Stop()
+
 $directCount = @($fullAccess | Where-Object { $_.Access -eq "Direct" }).Count
 $groupCount = @($fullAccess | Where-Object { $_.Access -eq "Security Group" }).Count
 
-# Display summary
 Write-Host "`nDirect Full Access grants: $directCount" -ForegroundColor Green
 Write-Host "Security group Full Access grants: $groupCount" -ForegroundColor Green
 Write-Host "Total Full Access grants: $($fullAccess.Count)" -ForegroundColor Magenta

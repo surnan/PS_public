@@ -1,4 +1,3 @@
-
 # Get_OffboardingExceptions.ps1
 # Input: None
 #
@@ -12,16 +11,16 @@
 #
 # Export: CSV with detailed information
 
+
 ####################################################################################
 #################### CONFIGURATION #################################################
 ####################################################################################
-
 $throttleLimit = 5
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-# ForEach-Object -Parallel not supported in Powershell 5
+# ForEach-Object -Parallel requires PowerShell 7
 if ($PSVersionTable.PSVersion.Major -lt 7) {
-    Write-Host "PowerShell 7 or later is required." -ForegroundColor Red
+    Write-Host "PowerShell 7 or later is required (1)." -ForegroundColor Red
     return
 }
 
@@ -29,17 +28,13 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 ####################################################################################
 #################### MICROSOFT GRAPH CONNECTION ####################################
 ####################################################################################
-
-# Customize these for each script
 $modules = @(
-    "Microsoft.Graph.Authentication"
     "Microsoft.Graph.Users"
 )
 
 $requiredScopes = @("User.Read.All", "Group.Read.All")
 
 try {
-    # Install and import required modules
     foreach ($module in $modules) {
         if (-not (Get-Module -ListAvailable -Name $module)) {
             Install-Module $module -Scope CurrentUser -ErrorAction Stop
@@ -48,7 +43,6 @@ try {
         Import-Module $module -ErrorAction Stop
     }
 
-    # Check existing connection
     $connection = Get-MgContext
 
     if (-not $connection) {
@@ -61,12 +55,10 @@ try {
         $connection = Get-MgContext
     }
 
-    # Verify authentication type
     if ($connection.AuthType -ne "Delegated") {
         throw "A delegated Microsoft Graph connection is required."
     }
 
-    # Verify required scopes
     $missingScopes = @(
         $requiredScopes | Where-Object {
             $_ -notin @($connection.Scopes)
@@ -74,11 +66,11 @@ try {
     )
 
     if ($missingScopes.Count -gt 0) {
-        throw "Missing Graph scopes: $($missingScopes -join ', '). Reconnect with the required scopes."
+        throw "Missing Graph scopes: $($missingScopes -join ', ')"
     }
 }
 catch {
-    Write-Host "Microsoft Graph connection failed:" -ForegroundColor Red
+    Write-Host "Microsoft Graph connection failed (2):" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     return
 }
@@ -87,26 +79,25 @@ catch {
 ####################################################################################
 #################### FIND ALL DISABLED ACCOUNTS ####################################
 ####################################################################################
-
 Write-Host "`nLoading disabled accounts..." -ForegroundColor Yellow
 
 try {
     $disabledUsers = @(
         Get-MgUser `
             -Filter "accountEnabled eq false" `
-            -Property Id,DisplayName,UserPrincipalName,AccountEnabled,ProxyAddresses,AssignedLicenses `
+            -Property Id, DisplayName, UserPrincipalName, AccountEnabled, ProxyAddresses, AssignedLicenses `
             -All `
             -ErrorAction Stop
     )
 }
 catch {
-    Write-Host "Unable to retrieve disabled accounts:" -ForegroundColor Red
+    Write-Host "Unable to retrieve disabled accounts (3):" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     return
 }
 
 if ($disabledUsers.Count -eq 0) {
-    Write-Host "No disabled accounts were found." -ForegroundColor Yellow
+    Write-Host "No disabled accounts were found (4)." -ForegroundColor Yellow
     $stopwatch.Stop()
     return
 }
@@ -114,10 +105,10 @@ if ($disabledUsers.Count -eq 0) {
 Write-Host "Disabled accounts found: $($disabledUsers.Count)" -ForegroundColor Cyan
 Write-Host "Parallel workers: $throttleLimit" -ForegroundColor Cyan
 
-####################################################################################
-#################### PARALLEL PROCESSING ############################################
-####################################################################################
 
+####################################################################################
+#################### PARALLEL PROCESSING ###########################################
+####################################################################################
 $processed = 0
 
 $parallelResults = @(
@@ -127,12 +118,10 @@ $parallelResults = @(
         $user = $_
 
         try {
-            # Each parallel runspace needs its own module imports.
-            Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+            # Each parallel runspace needs its own module import
             Import-Module Microsoft.Graph.Users -ErrorAction Stop
 
-            # A Graph session is not guaranteed to be inherited
-            # by parallel runspaces. Reuse cached user authentication.
+            # Graph connections are not guaranteed to carry into parallel runspaces
             if (-not (Get-MgContext)) {
                 Connect-MgGraph `
                     -Scopes "User.Read.All", "Group.Read.All" `
@@ -173,25 +162,24 @@ $parallelResults = @(
 
             $licenseCount = @($user.AssignedLicenses).Count
 
-            # Return one complete result per user.
-            # No shared arrays are modified by worker threads.
+            # Return one complete result per user
             [PSCustomObject]@{
-                DisplayName       = $user.DisplayName
-                UserPrincipalName = $user.UserPrincipalName
-                AccountEnabled    = $user.AccountEnabled
-                EmailAddressCount = $smtpAddresses.Count
-                GroupCount        = $groups.Count
-                LicenseCount      = $licenseCount
-                SMTPAddresses     = $aliasDisplay
-                Groups            = $groupDisplay
-                Error             = $null
+                DisplayName        = $user.DisplayName
+                UserPrincipalName  = $user.UserPrincipalName
+                AccountEnabled     = $user.AccountEnabled
+                EmailAddressCount  = $smtpAddresses.Count
+                GroupCount         = $groups.Count
+                LicenseCount       = $licenseCount
+                SMTPAddresses      = $aliasDisplay
+                Groups             = $groupDisplay
+                Error              = $null
             }
         }
         catch {
             [PSCustomObject]@{
-                DisplayName       = $user.DisplayName
-                UserPrincipalName = $user.UserPrincipalName
-                Error             = $_.Exception.Message
+                DisplayName        = $user.DisplayName
+                UserPrincipalName  = $user.UserPrincipalName
+                Error              = $_.Exception.Message
             }
         }
 
@@ -210,29 +198,29 @@ $parallelResults = @(
 
 Write-Progress -Activity "Checking disabled accounts" -Completed
 
-####################################################################################
-#################### CHECK FOR ERRORS ###############################################
-####################################################################################
 
+####################################################################################
+#################### CHECK FOR ERRORS ##############################################
+####################################################################################
 $scanErrors = @($parallelResults | Where-Object { $_.Error })
 
 if ($scanErrors.Count -gt 0) {
     Write-Host "`nErrors encountered: $($scanErrors.Count)" -ForegroundColor Red
 
     $scanErrors |
-        Format-Table DisplayName, UserPrincipalName, Error -Wrap
+    Format-Table DisplayName, UserPrincipalName, Error -Wrap
 
     Write-Host "CSV export skipped to avoid an incomplete report." -ForegroundColor Yellow
 
     $stopwatch.Stop()
-    Write-Host "Execution time: $($stopwatch.Elapsed)" -ForegroundColor Cyan
+    Write-Host "Execution time (5): $($stopwatch.Elapsed)" -ForegroundColor Cyan
     return
 }
 
-####################################################################################
-#################### PREPARE REPORTS ################################################
-####################################################################################
 
+####################################################################################
+#################### PREPARE REPORTS ###############################################
+####################################################################################
 $results = @($parallelResults | Sort-Object DisplayName)
 
 $consoleResults = @(
@@ -246,56 +234,56 @@ $consoleResults = @(
         AccountEnabled
 )
 
-####################################################################################
-#################### CONSOLE OUTPUT #################################################
-####################################################################################
 
+####################################################################################
+#################### CONSOLE OUTPUT ################################################
+####################################################################################
 Write-Host "`nTotal disabled accounts: $($results.Count)" -ForegroundColor Yellow
 Write-Host ""
 
 $consoleResults |
-    Format-Table `
-        DisplayName, `
-        UserPrincipalName, `
-        @{Name = "[Email Address #]"; Expression = { $_.EmailAddressCount }; Alignment = "Center"}, `
-        @{Name = "[Group #]"; Expression = { $_.GroupCount }; Alignment = "Center"}, `
-        @{Name = "[License #]"; Expression = { $_.LicenseCount }; Alignment = "Center"}, `
-        AccountEnabled `
-        -AutoSize
+Format-Table `
+    DisplayName, `
+    UserPrincipalName, `
+    @{Name = "[Email Address #]"; Expression = { $_.EmailAddressCount }; Alignment = "Center"}, `
+    @{Name = "[Group #]"; Expression = { $_.GroupCount }; Alignment = "Center"}, `
+    @{Name = "[License #]"; Expression = { $_.LicenseCount }; Alignment = "Center"}, `
+    AccountEnabled `
+    -AutoSize
+
 
 ####################################################################################
-#################### CREATE CSV #####################################################
+#################### CREATE CSV ####################################################
 ####################################################################################
-
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 $csvPath = ".\OffboardingExceptions_$timestamp.csv"
 
 try {
     $results |
-        Select-Object `
-            DisplayName,
-            UserPrincipalName,
-            AccountEnabled,
-            SMTPAddresses,
-            Groups,
-            LicenseCount |
-        Export-Csv `
-            -Path $csvPath `
-            -NoTypeInformation `
-            -Encoding utf8 `
-            -ErrorAction Stop
+    Select-Object `
+        DisplayName,
+        UserPrincipalName,
+        AccountEnabled,
+        SMTPAddresses,
+        Groups,
+        LicenseCount |
+    Export-Csv `
+        -Path $csvPath `
+        -NoTypeInformation `
+        -Encoding utf8 `
+        -ErrorAction Stop
 }
 catch {
-    Write-Host "CSV export failed:" -ForegroundColor Red
+    Write-Host "CSV export failed (6):" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     $stopwatch.Stop()
     return
 }
 
-####################################################################################
-#################### EXECUTION TIME #################################################
-####################################################################################
 
+####################################################################################
+#################### EXECUTION TIME ################################################
+####################################################################################
 $stopwatch.Stop()
 
 Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
