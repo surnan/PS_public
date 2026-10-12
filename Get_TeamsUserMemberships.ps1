@@ -1,67 +1,82 @@
+
 # Get-TeamsUserMembership.ps1
 # Read-only: direct teams and channels in/shared with those teams.
 # Shared-channel-only access to other teams is outside this report's scope.
 
+
+####################################################################################
+#################### MICROSOFT GRAPH CONNECTION ####################################
+####################################################################################
+$modules = @(
+    "Microsoft.Graph.Authentication"
+)
+
+$requiredScopes = @(
+    "User.Read.All"
+    "Team.ReadBasic.All"
+    "TeamMember.Read.All"
+    "Channel.ReadBasic.All"
+    "ChannelMember.Read.All"
+)
+
+try {
+    foreach ($module in $modules) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            Install-Module $module -Scope CurrentUser -ErrorAction Stop
+        }
+
+        Import-Module $module -ErrorAction Stop
+    }
+
+    $connection = Get-MgContext
+
+    if (-not $connection) {
+        Connect-MgGraph `
+            -Scopes $requiredScopes `
+            -ContextScope CurrentUser `
+            -NoWelcome `
+            -ErrorAction Stop
+
+        $connection = Get-MgContext
+    }
+
+    if ($connection.AuthType -ne "Delegated") {
+        throw "A delegated Microsoft Graph connection is required."
+    }
+
+    $missingScopes = @(
+        $requiredScopes | Where-Object {
+            $_ -notin @($connection.Scopes)
+        }
+    )
+
+    if ($missingScopes.Count -gt 0) {
+        throw "Missing Graph scopes: $($missingScopes -join ', ')"
+    }
+
+    $tenantId = $connection.TenantId
+}
+catch {
+    Write-Host "Microsoft Graph connection failed (1):" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
+}
+
+
+####################################################################################
+#################### GET INPUT PARAMETERS ##########################################
+####################################################################################
 $userEmail = (Read-Host "Enter user's email address").Trim()
 
 if ($userEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host 'Invalid email format.' -ForegroundColor Red
+    Write-Host "Invalid email format (2):" -ForegroundColor Red
     return
 }
 
-# Load only Authentication to reduce Graph submodule version conflicts.
-try {
-    if (-not (Get-Module -ListAvailable Microsoft.Graph.Authentication)) {
-        Write-Host 'Installing Microsoft.Graph.Authentication...' `
-            -ForegroundColor Yellow
 
-        Install-Module Microsoft.Graph.Authentication `
-            -Scope CurrentUser `
-            -ErrorAction Stop
-    }
-
-    Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-
-    $scopes = @(
-        'User.Read.All'
-        'Team.ReadBasic.All'
-        'TeamMember.Read.All'
-        'Channel.ReadBasic.All'
-        'ChannelMember.Read.All'
-    )
-
-    $context = Get-MgContext
-
-    $missingScopes = @(
-        $scopes |
-            Where-Object { $_ -notin $context.Scopes }
-    )
-
-    if (-not $context -or $missingScopes.Count -gt 0) {
-        Write-Host 'Connecting to Microsoft Graph...' `
-            -ForegroundColor Yellow
-
-        $connectionParameters = @{
-            Scopes       = $scopes
-            ContextScope = 'Process'
-            NoWelcome    = $true
-            ErrorAction  = 'Stop'
-        }
-
-        if ($context -and $context.TenantId) {
-            $connectionParameters.TenantId = $context.TenantId
-        }
-
-        Connect-MgGraph @connectionParameters
-    }
-
-    $tenantId = (Get-MgContext).TenantId
-}
-catch {
-    Write-Host "Unable to load modules or connect: $($_.Exception.Message)" `
-        -ForegroundColor Red
-    return
-}
+####################################################################################
+#################### HELPER FUNCTIONS ##############################################
+####################################################################################
 
 # Read every page before returning the complete collection.
 function Get-GraphCollection {
@@ -89,6 +104,7 @@ function Get-GraphCollection {
     $items.ToArray()
 }
 
+
 function Get-MembershipRole {
     param($Membership)
 
@@ -103,6 +119,10 @@ function Get-MembershipRole {
     }
 }
 
+
+####################################################################################
+#################### FIND TARGET USER ##############################################
+####################################################################################
 $baseUri = 'https://graph.microsoft.com/v1.0'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -141,6 +161,10 @@ try {
         $user = $matches[0]
     }
 
+
+    ####################################################################################
+    #################### FIND USER TEAMS ###############################################
+    ####################################################################################
     Write-Host "`nRetrieving teams for $($user.displayName)..." `
         -ForegroundColor Yellow
 
@@ -150,11 +174,15 @@ try {
     )
 
     if ($teams.Count -eq 0) {
-        Write-Host 'No direct Teams memberships found.' `
+        Write-Host 'No direct Teams memberships found (3)' `
             -ForegroundColor Yellow
         return
     }
 
+
+    ####################################################################################
+    #################### BUILD RESULTS OBJECT #########################################
+    ####################################################################################
     $results = [System.Collections.Generic.List[object]]::new()
 
     # Add identically structured rows to the report.
@@ -186,6 +214,10 @@ try {
         })
     }
 
+
+    ####################################################################################
+    #################### CHECK TEAM AND CHANNEL MEMBERSHIPS ###########################
+    ####################################################################################
     $index = 0
 
     foreach ($team in ($teams | Sort-Object displayName)) {
@@ -218,7 +250,6 @@ try {
         }
         catch {
             $teamError = $_.Exception.Message
-
             Write-Warning "$($team.displayName): $teamError"
         }
 
@@ -229,6 +260,10 @@ try {
             -RecordType 'Team' `
             -ErrorMessage $teamError
 
+
+        ################################################################################
+        #################### GET CHANNELS ##############################################
+        ################################################################################
         # Includes this team's channels and incoming shared channels.
         try {
             $channels = @(
@@ -253,6 +288,10 @@ try {
             continue
         }
 
+
+        ################################################################################
+        #################### CHECK CHANNEL MEMBERSHIPS ################################
+        ################################################################################
         foreach ($channel in ($channels | Sort-Object displayName)) {
             # Standard channels inherit team access.
             $channelRole = 'Inherited from team'
@@ -346,6 +385,10 @@ try {
         }
     }
 
+
+    ####################################################################################
+    #################### CONSOLE OUTPUT ################################################
+    ####################################################################################
     Write-Progress -Activity 'Checking teams and channels' -Completed
 
     # Console: team names and roles.
@@ -366,7 +409,10 @@ try {
             TeamName, ChannelName, ChannelType, ChannelRole, Access `
             -AutoSize -Wrap
 
-    # Export the complete report.
+
+    ####################################################################################
+    #################### CREATE CSV ####################################################
+    ####################################################################################
     $outputDirectory = if ($PSScriptRoot) {
         $PSScriptRoot
     }

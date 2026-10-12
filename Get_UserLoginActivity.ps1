@@ -1,266 +1,245 @@
 # Get_UserSignIns.ps1
-# Prompts for a user's email address and number of days.
-# Returns the user's Entra ID sign-in activity during that period.
-# Exports full results to a CSV file.
+# Input: User email address (UPN) and number of days
+#
+# Output:
+#   Sign-in time
+#   User
+#   Application
+#   IP address
+#   Client application
+#   Device information
+#   Location
+#   Sign-in status and failure reason
+#
+# Export:
+#   CSV: Full sign-in results
 
 
-# Connect to Microsoft Graph if necessary
-$context = Get-MgContext
+####################################################################################
+#################### MICROSOFT GRAPH CONNECTION ####################################
+####################################################################################
+$modules = @(
+    "Microsoft.Graph.Users"
+    "Microsoft.Graph.Reports"
+)
 
-if (-not $context) {
+$requiredScopes = @("User.Read.All", "AuditLog.Read.All")
 
-    Write-Host "Not connected to Microsoft Graph. Connecting..." `
-        -ForegroundColor Gray
+try {
+    foreach ($module in $modules) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            Install-Module $module -Scope CurrentUser -ErrorAction Stop
+        }
 
-    Connect-MgGraph -Scopes `
-        "User.Read.All", `
-        "AuditLog.Read.All"
+        Import-Module $module -ErrorAction Stop
+    }
+
+    $connection = Get-MgContext
+
+    if (-not $connection) {
+        Connect-MgGraph `
+            -Scopes $requiredScopes `
+            -ContextScope CurrentUser `
+            -NoWelcome `
+            -ErrorAction Stop
+
+        $connection = Get-MgContext
+    }
+
+    if ($connection.AuthType -ne "Delegated") {
+        throw "A delegated Microsoft Graph connection is required."
+    }
+
+    $missingScopes = @(
+        $requiredScopes | Where-Object {
+            $_ -notin @($connection.Scopes)
+        }
+    )
+
+    if ($missingScopes.Count -gt 0) {
+        throw "Missing Graph scopes: $($missingScopes -join ', ')"
+    }
+}
+catch {
+    Write-Host "Microsoft Graph connection failed (1):" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
 }
 
 
-# Prompt for user's email address
-$userEmail = Read-Host "Enter user's email address"
+####################################################################################
+#################### GET INPUT PARAMETERS ##########################################
+####################################################################################
+$userEmail = (Read-Host "Enter user's email address").Trim()
 
-$userEmail = $userEmail.Trim()
-
-
-# Verify email format
 if ($userEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-
-    Write-Host `
-        "Invalid email format." `
-        -ForegroundColor Red `
-        -BackgroundColor White
-
-    exit
+    Write-Host "Invalid email format (2):" -ForegroundColor Red
+    return
 }
 
-
-# Prompt for number of days
 $daysInput = Read-Host "Enter the number of days to search through in logs"
 
 $days = 0
 
-$isValid = [int]::TryParse(
-    $daysInput,
-    [ref]$days
-)
+$isValid = [int]::TryParse($daysInput, [ref]$days)
 
-
-# Verify that input is a positive integer
 if (-not $isValid -or $days -le 0) {
-
-    Write-Host `
-        "Invalid input. Please enter a positive whole number." `
-        -ForegroundColor Red `
-        -BackgroundColor White
-
-    exit
+    Write-Host "Invalid input. Please enter a positive integer (3):" -ForegroundColor Red
+    return
 }
 
 
-# Verify that the user exists
-Write-Host `
-    "`nSearching for $userEmail..." `
-    -ForegroundColor Yellow
-
+####################################################################################
+#################### FIND TARGET USER ##############################################
+####################################################################################
+Write-Host "`nSearching for $userEmail..." -ForegroundColor Yellow
 
 try {
-
     $user = Get-MgUser `
         -Filter "userPrincipalName eq '$userEmail'" `
-        -Property `
-            Id,
-            DisplayName,
-            UserPrincipalName `
+        -Property Id, DisplayName, UserPrincipalName `
         -ErrorAction Stop
-
 }
 catch {
-
-    Write-Host `
-        "`nMicrosoft Graph returned an error:" `
-        -ForegroundColor Red
-
-    Write-Host `
-        $_.Exception.Message `
-        -ForegroundColor Red
-
-    exit
+    Write-Host "Microsoft Graph returned an error (4):" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
 }
 
-
-# Make sure a user was returned
 if (-not $user) {
-
-    Write-Host `
-        "`nNo user was found with UPN: $userEmail" `
-        -ForegroundColor Red
-
-    exit
+    Write-Host "`nNo user was found with UPN (5): $userEmail" -ForegroundColor Red
+    return
 }
 
-
-Write-Host `
-    "`nUser found: $($user.DisplayName)" `
-    -ForegroundColor Green
+Write-Host "`nUser found: $($user.DisplayName)" -ForegroundColor Green
 
 
-# Calculate cutoff date in UTC
+####################################################################################
+#################### BUILD DATE FILTER #############################################
+####################################################################################
 $cutoffDate = (Get-Date).AddDays(-$days).ToUniversalTime()
+$cutoffDateString = $cutoffDate.ToString("yyyy-MM-ddTHH:mm:ssZ")
 
-$cutoffDateString = $cutoffDate.ToString(
-    "yyyy-MM-ddTHH:mm:ssZ"
-)
-
-
-Write-Host `
-    "`nRetrieving sign-ins from the last $days days..." `
-    -ForegroundColor Yellow
+Write-Host "`nRetrieving sign-ins from the last $days days..." -ForegroundColor Yellow
 
 
-# Get sign-in logs
+####################################################################################
+#################### GET SIGN-IN LOGS ##############################################
+####################################################################################
 try {
-
     Write-Progress `
         -Activity "Searching Entra sign-in logs" `
         -Status "Retrieving sign-in events for $userEmail..."
 
-    $signIns = Get-MgAuditLogSignIn `
-        -Filter "userPrincipalName eq '$userEmail' and createdDateTime ge $cutoffDateString" `
-        -All `
-        -ErrorAction Stop
-
-    Write-Progress `
-        -Activity "Searching Entra sign-in logs" `
-        -Completed
-
+    $signIns = @(
+        Get-MgAuditLogSignIn `
+            -Filter "userPrincipalName eq '$userEmail' and createdDateTime ge $cutoffDateString" `
+            -All `
+            -ErrorAction Stop
+    )
 }
 catch {
-
+    Write-Host "Unable to retrieve sign-in logs (6):" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
+}
+finally {
     Write-Progress `
         -Activity "Searching Entra sign-in logs" `
         -Completed
-
-    Write-Host `
-        "`nUnable to retrieve sign-in logs." `
-        -ForegroundColor Red
-
-    Write-Host `
-        $_.Exception.Message `
-        -ForegroundColor Red
-
-    exit
 }
 
 
-# Check for results
-if (-not $signIns) {
-
-    Write-Host `
-        "`nNo sign-in activity found for $userEmail during the last $days days." `
-        -ForegroundColor Yellow
-
-    exit
+####################################################################################
+#################### CHECK RESULTS #################################################
+####################################################################################
+if ($signIns.Count -eq 0) {
+    Write-Host "`nNo sign-in activity found for $userEmail during the last $days days (7):" -ForegroundColor Yellow
+    return
 }
 
 
-# Build results
-$results = foreach ($signIn in $signIns) {
+####################################################################################
+#################### BUILD RESULTS OBJECT ##########################################
+####################################################################################
+$results = @(
+    foreach ($signIn in $signIns) {
+        [PSCustomObject]@{
+            SignInTime      = $signIn.CreatedDateTime.ToLocalTime()
+            User            = $signIn.UserPrincipalName
+            Application     = $signIn.AppDisplayName
+            IPAddress       = $signIn.IpAddress
+            ClientApp       = $signIn.ClientAppUsed
+            Device          = $signIn.DeviceDetail.DisplayName
+            OperatingSystem = $signIn.DeviceDetail.OperatingSystem
+            Browser         = $signIn.DeviceDetail.Browser
+            City            = $signIn.Location.City
+            State           = $signIn.Location.State
+            Country         = $signIn.Location.CountryOrRegion
 
-    [PSCustomObject]@{
+            Status = if ($signIn.Status.ErrorCode -eq 0) {
+                "Success"
+            }
+            else {
+                "Failed"
+            }
 
-        SignInTime = $signIn.CreatedDateTime.ToLocalTime()
-
-        User = $signIn.UserPrincipalName
-
-        Application = $signIn.AppDisplayName
-
-        IPAddress = $signIn.IpAddress
-
-        ClientApp = $signIn.ClientAppUsed
-
-        Device = $signIn.DeviceDetail.DisplayName
-
-        OperatingSystem = $signIn.DeviceDetail.OperatingSystem
-
-        Browser = $signIn.DeviceDetail.Browser
-
-        City = $signIn.Location.City
-
-        State = $signIn.Location.State
-
-        Country = $signIn.Location.CountryOrRegion
-
-        Status = if ($signIn.Status.ErrorCode -eq 0) {
-            "Success"
-        }
-        else {
-            "Failed"
-        }
-
-        FailureReason = if ($signIn.Status.ErrorCode -eq 0) {
-            ""
-        }
-        else {
-            $signIn.Status.FailureReason
+            FailureReason = if ($signIn.Status.ErrorCode -eq 0) {
+                ""
+            }
+            else {
+                $signIn.Status.FailureReason
+            }
         }
     }
-}
+)
+
+$results = @($results | Sort-Object SignInTime -Descending)
 
 
-# Sort results newest to oldest
-$results = $results |
-    Sort-Object SignInTime -Descending
-
-
-# Display results on console
-Write-Host `
-    "`nSign-in activity for $($user.DisplayName)" `
-    -ForegroundColor Cyan
-
-Write-Host `
-    "Last $days days" `
-    -ForegroundColor Cyan
-
+####################################################################################
+#################### CONSOLE OUTPUT ################################################
+####################################################################################
+Write-Host "`nSign-in activity for $($user.DisplayName)" -ForegroundColor Cyan
+Write-Host "Last $days days" -ForegroundColor Cyan
 
 $results |
-    Format-Table `
-        SignInTime,
-        Application,
-        IPAddress,
-        ClientApp,
-        OperatingSystem,
-        Status `
-        -AutoSize
+Format-Table `
+    SignInTime,
+    Application,
+    IPAddress,
+    ClientApp,
+    OperatingSystem,
+    Status `
+    -AutoSize |
+Out-Host
+
+Write-Host "`nTotal sign-in events: $($results.Count)" -ForegroundColor Cyan
 
 
-Write-Host `
-    "`nTotal sign-in events: $($results.Count)" `
-    -ForegroundColor Cyan
-
-
-# Create safe version of username for CSV filename
+####################################################################################
+#################### CREATE CSV ####################################################
+####################################################################################
 $safeUserName = $user.UserPrincipalName `
     -replace '@', '_' `
     -replace '\.', '_'
 
-
-# Create timestamp
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
-
-# Create CSV path
 $csvPath = ".\UserSignIns_$($safeUserName)_$timestamp.csv"
 
-
-# Export full PSCustomObject results to CSV
-$results |
+try {
+    $results |
     Export-Csv `
         -Path $csvPath `
-        -NoTypeInformation
+        -NoTypeInformation `
+        -Encoding utf8 `
+        -ErrorAction Stop
+}
+catch {
+    Write-Host "Unable to create CSV file: (8)" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    return
+}
 
-
-Write-Host `
-    "`nCSV file created: $csvPath" `
-    -ForegroundColor Green
+Write-Host "`nCSV file created: $csvPath" -ForegroundColor Green
