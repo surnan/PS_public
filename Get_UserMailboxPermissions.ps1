@@ -6,19 +6,18 @@
 # multiple processes querying the same mailbox
 
 
+
 ####################################################################################
 #################### EXCHANGE ONLINE CONNECTION ####################################
 ####################################################################################
-$modules = @(
-    "ExchangeOnlineManagement"
-)
+$module = "ExchangeOnlineManagement"
 
 try {
-    foreach ($module in $modules) {
-        if (-not (Get-Module -ListAvailable -Name $module)) {
-            Install-Module $module -Scope CurrentUser -ErrorAction Stop
-        }
+    if (-not (Get-Module -ListAvailable -Name $module)) {
+        Install-Module $module -Scope CurrentUser -ErrorAction Stop
+    }
 
+    if (-not (Get-Module -Name $module)) {
         Import-Module $module -ErrorAction Stop
     }
 
@@ -32,10 +31,11 @@ try {
     }
 }
 catch {
-    Write-Host "Exchange Online connection failed (1)" -ForegroundColor Red
+    Write-Host "Exchange Online connection failed (1):" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     return
 }
+
 
 
 ####################################################################################
