@@ -4,22 +4,18 @@
 # Shared-channel-only access to other teams is outside this report's scope.
 
 
+
 ####################################################################################
 #################### MICROSOFT GRAPH CONNECTION ####################################
 ####################################################################################
 $modules = @(
-    "Microsoft.Graph.Authentication"
+    "Microsoft.Graph.Users"
 )
 
-$requiredScopes = @(
-    "User.Read.All"
-    "Team.ReadBasic.All"
-    "TeamMember.Read.All"
-    "Channel.ReadBasic.All"
-    "ChannelMember.Read.All"
-)
+$requiredScopes = @("User.Read.All", "Group.Read.All")
 
 try {
+    # Install and import required modules
     foreach ($module in $modules) {
         if (-not (Get-Module -ListAvailable -Name $module)) {
             Install-Module $module -Scope CurrentUser -ErrorAction Stop
@@ -28,9 +24,20 @@ try {
         Import-Module $module -ErrorAction Stop
     }
 
+    # Check existing connection and permissions
     $connection = Get-MgContext
 
-    if (-not $connection) {
+    $missingScopes = @(
+        $requiredScopes | Where-Object {
+            $_ -notin @($connection.Scopes)
+        }
+    )
+
+    # Connect if disconnected or missing required permissions
+    if (-not $connection -or
+        $connection.AuthType -ne "Delegated" -or
+        $missingScopes.Count -gt 0) {
+
         Connect-MgGraph `
             -Scopes $requiredScopes `
             -ContextScope CurrentUser `
@@ -40,10 +47,12 @@ try {
         $connection = Get-MgContext
     }
 
-    if ($connection.AuthType -ne "Delegated") {
+    # Verify authentication type
+    if (-not $connection -or $connection.AuthType -ne "Delegated") {
         throw "A delegated Microsoft Graph connection is required."
     }
 
+    # Verify required permissions
     $missingScopes = @(
         $requiredScopes | Where-Object {
             $_ -notin @($connection.Scopes)
@@ -53,14 +62,13 @@ try {
     if ($missingScopes.Count -gt 0) {
         throw "Missing Graph scopes: $($missingScopes -join ', ')"
     }
-
-    $tenantId = $connection.TenantId
 }
 catch {
-    Write-Host "Microsoft Graph connection failed (1):" -ForegroundColor Red
+    Write-Host "Microsoft Graph connection failed:" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     return
 }
+
 
 
 ####################################################################################

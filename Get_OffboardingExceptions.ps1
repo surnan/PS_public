@@ -25,6 +25,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 }
 
 
+
 ####################################################################################
 #################### MICROSOFT GRAPH CONNECTION ####################################
 ####################################################################################
@@ -35,6 +36,7 @@ $modules = @(
 $requiredScopes = @("User.Read.All", "Group.Read.All")
 
 try {
+    # Install and import required modules
     foreach ($module in $modules) {
         if (-not (Get-Module -ListAvailable -Name $module)) {
             Install-Module $module -Scope CurrentUser -ErrorAction Stop
@@ -43,9 +45,20 @@ try {
         Import-Module $module -ErrorAction Stop
     }
 
+    # Check existing connection and permissions
     $connection = Get-MgContext
 
-    if (-not $connection) {
+    $missingScopes = @(
+        $requiredScopes | Where-Object {
+            $_ -notin @($connection.Scopes)
+        }
+    )
+
+    # Connect if disconnected or missing required permissions
+    if (-not $connection -or
+        $connection.AuthType -ne "Delegated" -or
+        $missingScopes.Count -gt 0) {
+
         Connect-MgGraph `
             -Scopes $requiredScopes `
             -ContextScope CurrentUser `
@@ -55,10 +68,12 @@ try {
         $connection = Get-MgContext
     }
 
-    if ($connection.AuthType -ne "Delegated") {
+    # Verify authentication type
+    if (-not $connection -or $connection.AuthType -ne "Delegated") {
         throw "A delegated Microsoft Graph connection is required."
     }
 
+    # Verify required permissions
     $missingScopes = @(
         $requiredScopes | Where-Object {
             $_ -notin @($connection.Scopes)
@@ -70,10 +85,11 @@ try {
     }
 }
 catch {
-    Write-Host "Microsoft Graph connection failed (2):" -ForegroundColor Red
+    Write-Host "Microsoft Graph connection failed:" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     return
 }
+
 
 
 ####################################################################################
@@ -245,9 +261,9 @@ $consoleResults |
 Format-Table `
     DisplayName, `
     UserPrincipalName, `
-    @{Name = "[Email Address #]"; Expression = { $_.EmailAddressCount }; Alignment = "Center"}, `
-    @{Name = "[Group #]"; Expression = { $_.GroupCount }; Alignment = "Center"}, `
-    @{Name = "[License #]"; Expression = { $_.LicenseCount }; Alignment = "Center"}, `
+    @{Name = "[SMTP Count]"; Expression = { $_.EmailAddressCount }; Alignment = "Center"}, `
+    @{Name = "[Groups]"; Expression = { $_.GroupCount }; Alignment = "Center"}, `
+    @{Name = "[Licenses]"; Expression = { $_.LicenseCount }; Alignment = "Center"}, `
     AccountEnabled `
     -AutoSize
 
