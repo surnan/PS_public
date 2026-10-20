@@ -191,10 +191,12 @@ $sortedResults |
 Format-Table Name, Owner, Enabled, Compliant, DaysInactive -AutoSize |
 Out-Host
 
-$csvPath = Join-Path $PSScriptRoot "EntraDevices.csv"
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$csvPath = Join-Path $PSScriptRoot "EntraDevices_$timestamp.csv"
 
 $results |
-Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+    Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
 
 Write-Host "`nCSV exported to: $csvPath" -ForegroundColor Green
+
 
