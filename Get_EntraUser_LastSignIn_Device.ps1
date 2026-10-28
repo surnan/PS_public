@@ -222,7 +222,9 @@ Write-Progress -Activity "Building Entra sign-in device report" -Completed
 ####################################################################################
 #################### CONSOLE OUTPUT ################################################
 ####################################################################################
-$results = @($results | Sort-Object DisplayName)
+# $results = @($results | Sort-Object DisplayName)
+$results = @($results | Sort-Object LastSignIn -Descending)
+
 
 Write-Host "`n================ REPORT SUMMARY ================" -ForegroundColor Cyan
 
@@ -234,10 +236,24 @@ Write-Host "Users with computer names: $( @($results | Where-Object {
 
 Write-Host "`nLAST SIGN-IN DEVICES" -ForegroundColor Cyan
 
+# $results |
+#     Select-Object DisplayName, LastSignIn, ComputerName, OperatingSystem |
+#     Format-Table -AutoSize
 $results |
-    Select-Object DisplayName, LastSignIn, ComputerName, OperatingSystem |
+    Sort-Object LastSignIn -Descending |
+    Select-Object `
+        @{Name = 'DisplayName'; Expression = {
+            if ($_.DisplayName.Length -gt 20) {
+                $_.DisplayName.Substring(0, 17) + '...'
+            }
+            else {
+                $_.DisplayName
+            }
+        }},
+        LastSignIn,
+        ComputerName,
+        OperatingSystem |
     Format-Table -AutoSize
-
 
 ####################################################################################
 #################### EXPORT CSV ####################################################
