@@ -1,288 +1,180 @@
-
 # Get_EntraGroup_Members.ps1
-# Input: Group email address (primary email or alias)
-#
-# Output: $tgDetails
-#   Group Name
-#   Group Email
-#   Group Type
-#   All Email Aliases
-#   Group Members (Name, UPN, Email)
-#
-# Export:
-#   CSV: Same Output
+# Read-only report for an Entra ID group and its direct members.
+# Installs/imports required Graph modules, exports a timestamped CSV.
+# Compatible with Windows PowerShell 5.1 and PowerShell 7.
 
-
+$ErrorActionPreference = 'Stop'
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 ####################################################################################
 #################### MICROSOFT GRAPH CONNECTION ####################################
 ####################################################################################
+
 $modules = @(
-    "Microsoft.Graph.Users"
+    'Microsoft.Graph.Groups',
+    'Microsoft.Graph.Users'
 )
 
-$requiredScopes = @("User.Read.All", "Group.Read.All")
-
 try {
-    # Install and import required modules
     foreach ($module in $modules) {
         if (-not (Get-Module -ListAvailable -Name $module)) {
-            Install-Module $module -Scope CurrentUser -ErrorAction Stop
+            Write-Host "Installing missing module: $module" -ForegroundColor Yellow
+            if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+            }
+            Install-Module -Name $module -Scope CurrentUser -Repository PSGallery -Force -AllowClobber -ErrorAction Stop
         }
-
-        Import-Module $module -ErrorAction Stop
+        Import-Module -Name $module -ErrorAction Stop
     }
 
-    # Check existing connection and permissions
-    $connection = Get-MgContext
-
-    $missingScopes = @(
-        $requiredScopes | Where-Object {
-            $_ -notin @($connection.Scopes)
+    $requiredCommands = @('Connect-MgGraph', 'Get-MgContext', 'Get-MgGroup', 'Get-MgGroupMember', 'Get-MgUser')
+    foreach ($command in $requiredCommands) {
+        if (-not (Get-Command -Name $command -ErrorAction SilentlyContinue)) {
+            throw "Required Microsoft Graph command '$command' is unavailable after importing modules."
         }
-    )
-
-    # Connect if disconnected or missing required permissions
-    if (-not $connection -or
-        $connection.AuthType -ne "Delegated" -or
-        $missingScopes.Count -gt 0) {
-
-        Connect-MgGraph `
-            -Scopes $requiredScopes `
-            -ContextScope CurrentUser `
-            -NoWelcome `
-            -ErrorAction Stop
-
-        $connection = Get-MgContext
     }
 
-    # Verify authentication type
-    if (-not $connection -or $connection.AuthType -ne "Delegated") {
-        throw "A delegated Microsoft Graph connection is required."
+    $requiredScopes = @('Group.Read.All', 'User.Read.All', 'Directory.Read.All')
+    $context = Get-MgContext
+    $missingScopes = @($requiredScopes | Where-Object { -not $context -or $_ -notin @($context.Scopes) })
+
+    if (-not $context -or $missingScopes.Count -gt 0) {
+        Write-Host 'Connecting to Microsoft Graph...' -ForegroundColor Cyan
+        Connect-MgGraph -Scopes $requiredScopes -NoWelcome -ErrorAction Stop
     }
 
-    # Verify required permissions
-    $missingScopes = @(
-        $requiredScopes | Where-Object {
-            $_ -notin @($connection.Scopes)
-        }
-    )
-
+    $context = Get-MgContext
+    if (-not $context) { throw 'No active Microsoft Graph connection.' }
+    $missingScopes = @($requiredScopes | Where-Object { $_ -notin @($context.Scopes) })
     if ($missingScopes.Count -gt 0) {
-        throw "Missing Graph scopes: $($missingScopes -join ', ')"
+        throw "Missing Microsoft Graph permissions: $($missingScopes -join ', ')"
     }
 }
 catch {
-    Write-Host "Microsoft Graph connection failed:" -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "Microsoft Graph setup/connection failed: $($_.Exception.Message)" -ForegroundColor Red
     return
 }
 
-
-
 ####################################################################################
-#################### GET INPUT PARAMETERS ##########################################
+#################### INPUT / GROUP LOOKUP ##########################################
 ####################################################################################
-$inputEmail = (Read-Host "Enter group's email address").Trim()
-if ($inputEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    Write-Host "Invalid email format (1A)" -ForegroundColor Red
+
+$groupInput = (Read-Host "Enter group's primary email address").Trim()
+if ([string]::IsNullOrWhiteSpace($groupInput)) {
+    Write-Host 'No group address entered.' -ForegroundColor Red
     return
 }
-
-
-####################################################################################
-#################### FIND TARGET GROUP #############################################
-####################################################################################
-$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
-    $targetGroup = Get-MgGroup `
-        -Filter "mail eq '$inputEmail'" `
-        -Property Id, DisplayName, Mail, ProxyAddresses, GroupTypes, MailEnabled, SecurityEnabled `
-        -ErrorAction Stop
-}
-catch {
-    Write-Warning "Microsoft Graph error (2): $($_.Exception.Message)"
-    return
-}
-
-# Check alias emails if targetGroup not found
-if (-not $targetGroup) {
-    Write-Host "Not found as primary email. Checking aliases..." -ForegroundColor Yellow
-
-    try {
-        # SMTP = primary; smtp = alias
-        $targetGroup = Get-MgGroup `
-            -Filter "proxyAddresses/any(address:address eq 'smtp:$inputEmail')" `
-            -Property Id, DisplayName, Mail, ProxyAddresses, GroupTypes, MailEnabled, SecurityEnabled `
-            -ErrorAction Stop
-    }
-    catch {
-        Write-Warning "Microsoft Graph error (3): $($_.Exception.Message)"
+    # Escape single quotes for Microsoft Graph OData filtering.
+    $safeAddress = $groupInput.Replace("'", "''")
+    $groups = @(Get-MgGroup -Filter "mail eq '$safeAddress'" -Property 'id,displayName,mail,mailEnabled,securityEnabled,groupTypes,proxyAddresses' -All -ErrorAction Stop)
+    if ($groups.Count -eq 0) {
+        Write-Host "No group found with primary email address: $groupInput" -ForegroundColor Yellow
         return
     }
-}
-
-if (-not $targetGroup) {
-    Write-Host "No group found with email address (4): $inputEmail" -ForegroundColor Red
-    return
-}
-
-
-####################################################################################
-#################### GET GROUP MEMBERS #############################################
-####################################################################################
-try {
-    $groupMembers = @(
-        Get-MgGroupMemberAsUser `
-            -GroupId $targetGroup.Id `
-            -Property DisplayName, UserPrincipalName, Mail `
-            -All `
-            -ErrorAction Stop
-    )
+    $group = $groups[0]
+    $members = @(Get-MgGroupMember -GroupId $group.Id -All -ErrorAction Stop)
 }
 catch {
-    Write-Host "Unable to retrieve group members (5): $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Unable to retrieve group or members: $($_.Exception.Message)" -ForegroundColor Red
     return
 }
 
-
 ####################################################################################
-################# BUILD GROUP DETAILS OUTPUT OBJECT ################################
+#################### BUILD REPORT ##################################################
 ####################################################################################
-$tgDetails = [PSCustomObject]@{
-    Name      = $targetGroup.DisplayName
-    Email     = $targetGroup.Mail
 
-    GroupType = if ($targetGroup.GroupTypes -contains "Unified") {
-        "Microsoft 365"
-    }
-    elseif ($targetGroup.MailEnabled -and $targetGroup.SecurityEnabled) {
-        "Mail-enabled Security"
-    }
-    elseif ($targetGroup.MailEnabled) {
-        "Distribution"
-    }
-    elseif ($targetGroup.SecurityEnabled) {
-        "Security"
-    }
-    else {
-        "Unknown"
-    }
+$groupType = if (@($group.GroupTypes) -contains 'Unified') { 'Microsoft 365' }
+             elseif ($group.SecurityEnabled -and $group.MailEnabled) { 'Mail-enabled security' }
+             elseif ($group.SecurityEnabled) { 'Security' }
+             elseif ($group.MailEnabled) { 'Distribution' }
+             else { 'Other' }
 
-    Aliases   = @(
-        $targetGroup.ProxyAddresses |
-        Where-Object { $_ -cmatch '^smtp:' } |
-        ForEach-Object { $_ -creplace '^smtp:', '' } |
-        Sort-Object
-    )
+$aliases = @($group.ProxyAddresses | Where-Object { $_ -match '^(?i)smtp:' } | ForEach-Object { $_ -replace '^(?i)smtp:', '' }) -join '; '
+$results = @(
+    foreach ($member in $members) {
+        $memberType = 'Other'
+        if ($member.AdditionalProperties -and $member.AdditionalProperties.ContainsKey('@odata.type')) {
+            $memberType = [string]$member.AdditionalProperties['@odata.type'] -replace '^#microsoft.graph\.', ''
+        }
 
-    Members   = @($groupMembers |
-        ForEach-Object { [PSCustomObject]@{
-                Name  = $_.DisplayName
-                UPN   = $_.UserPrincipalName
-                Email = $_.Mail
+        $name = $null
+        $upn = $null
+        $email = $null
+        $memberId = $member.Id
+
+        if ($memberType -eq 'user') {
+            try {
+                $user = Get-MgUser -UserId $memberId -Property 'displayName,userPrincipalName,mail' -ErrorAction Stop
+                $name = $user.DisplayName
+                $upn = $user.UserPrincipalName
+                $email = $user.Mail
+            }
+            catch {
+                Write-Warning "Could not read user $memberId : $($_.Exception.Message)"
             }
         }
-    )
-}
+        else {
+            if ($member.AdditionalProperties) {
+                $name = [string]$member.AdditionalProperties['displayName']
+                $upn = [string]$member.AdditionalProperties['userPrincipalName']
+                $email = [string]$member.AdditionalProperties['mail']
+            }
+        }
 
+        [PSCustomObject]@{
+            GroupName       = $group.DisplayName
+            GroupEmail      = $group.Mail
+            GroupType       = $groupType
+            MailEnabled     = $group.MailEnabled
+            SecurityEnabled = $group.SecurityEnabled
+            GroupAliases    = $aliases
+            MemberName      = $name
+            MemberUPN       = $upn
+            MemberEmail     = $email
+            MemberType      = $memberType
+            MemberId        = $memberId
+        }
+    }
+)
+
+# Preserve group metadata in the CSV even when there are no direct members.
+if ($results.Count -eq 0) {
+    $results = @([PSCustomObject]@{
+        GroupName = $group.DisplayName; GroupEmail = $group.Mail; GroupType = $groupType
+        MailEnabled = $group.MailEnabled; SecurityEnabled = $group.SecurityEnabled
+        GroupAliases = $aliases; MemberName = $null; MemberUPN = $null
+        MemberEmail = $null; MemberType = $null; MemberId = $null
+    })
+}
 
 ####################################################################################
-#################### CONSOLE OUTPUT ################################################
+#################### CONSOLE AND CSV OUTPUT ########################################
 ####################################################################################
-Write-Host ("`n{0,-20}" -f "Group Name:") -ForegroundColor Green -NoNewline
-Write-Host $tgDetails.Name
-Write-Host ("{0,-20}" -f "Group Email:") -ForegroundColor Green -NoNewline
-Write-Host $tgDetails.Email
-Write-Host ("{0,-20}" -f "Group Type:") -ForegroundColor Green -NoNewline
-Write-Host $tgDetails.GroupType
 
-Write-Host "`nEmail Aliases:" -ForegroundColor Green
+Write-Host "`nGroup: $($group.DisplayName)" -ForegroundColor Cyan
+Write-Host "Email: $($group.Mail)"
+Write-Host "Type: $groupType"
+Write-Host "Mail enabled: $($group.MailEnabled)"
+Write-Host "Security enabled: $($group.SecurityEnabled)"
+Write-Host "Aliases: $aliases"
+Write-Host "Direct members: $($members.Count)"
 
-if ($tgDetails.Aliases.Count -gt 0) {
-    $tgDetails.Aliases | Out-Host
-}
-else {
-    Write-Host "No email aliases found." -ForegroundColor Yellow
-}
+$results | Format-Table MemberName, MemberUPN, MemberEmail, MemberType -AutoSize
 
-Write-Host "`n{Group Members Table}" -ForegroundColor Green
-
-if ($tgDetails.Members.Count -gt 0) {
-    $tgDetails.Members |
-    Sort-Object Name |
-    Format-Table -AutoSize |
-    Out-Host
-}
-else {
-    Write-Host "No user members found in this group." -ForegroundColor Yellow
-}
-
-
-####################################################################################
-#################### CREATE CSV ####################################################
-####################################################################################
-$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-
-# Replace invalid filename characters
-$groupName_2_fileName = $tgDetails.Name -replace '[^\w\.-]', '_'
-$csvPath = ".\GroupDetails_${groupName_2_fileName}_$timestamp.csv"
-$csvCreated = $false
+$timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+$filename = "Get_EntraGroup_Members_$timestamp.csv"
+$csvPath = Join-Path -Path $PSScriptRoot -ChildPath $filename
 
 try {
-    @(
-        "Group Name,$($tgDetails.Name)"
-        "Group Email,$($tgDetails.Email)"
-        "Group Type,$($tgDetails.GroupType)"
-    ) | Set-Content -Path $csvPath -Encoding utf8
-
-    # Email aliases
-    "" | Add-Content -Path $csvPath -Encoding utf8
-    "Email Aliases" | Add-Content -Path $csvPath -Encoding utf8
-
-    if ($tgDetails.Aliases.Count -gt 0) {
-        $tgDetails.Aliases |
-        Add-Content -Path $csvPath -Encoding utf8
-    }
-    else {
-        "No email aliases found." |
-        Add-Content -Path $csvPath -Encoding utf8
-    }
-
-    # Group members
-    "" | Add-Content -Path $csvPath -Encoding utf8
-    "Group Members" | Add-Content -Path $csvPath -Encoding utf8
-
-    if ($tgDetails.Members.Count -gt 0) {
-        $tgDetails.Members |
-        Sort-Object Name |
-        ConvertTo-Csv -NoTypeInformation |
-        Add-Content -Path $csvPath -Encoding utf8
-    }
-    else {
-        "Name,UPN,Email" |
-        Add-Content -Path $csvPath -Encoding utf8
-    }
-    $csvCreated = $true
+    $results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+    Write-Host "`nCSV saved: $csvPath" -ForegroundColor Green
 }
 catch {
-    Write-Host "Unable to create CSV file: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "CSV export failed: $($_.Exception.Message)" -ForegroundColor Red
 }
-
-
-####################################################################################
-#################### EXECUTION TIME ################################################
-####################################################################################
-$stopwatch.Stop()
-
-Write-Host ("`n{0,-25}" -f "File Name:") -ForegroundColor DarkCyan -NoNewline
-Write-Host "Get_EntraGroup_Members.ps1" -ForegroundColor Cyan
-
-if ($csvCreated) {
-    Write-Host ("{0,-25}" -f "CSV file generated:") -ForegroundColor DarkYellow -NoNewline
-    Write-Host (Resolve-Path $csvPath) -ForegroundColor DarkYellow
+finally {
+    $stopwatch.Stop()
+    Write-Host "Execution time: $($stopwatch.Elapsed.ToString('hh\:mm\:ss'))" -ForegroundColor Cyan
 }
-
-Write-Host ("{0,-25}" -f "Total Execution Time:") -ForegroundColor DarkGreen -NoNewline
-Write-Host "($($stopwatch.Elapsed))" -ForegroundColor DarkGreen
